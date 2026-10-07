@@ -1,7 +1,25 @@
-// Gera URL curta via API pública do TinyURL (sem chave)
 export async function shortenUrl(longUrl: string): Promise<string> {
   const endpoint = `https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`;
-  const res = await fetch(endpoint);
-  if (!res.ok) throw new Error("Falha ao gerar URL curta.");
-  return (await res.text()).trim();
+
+  try {
+    const res = await fetch(endpoint, {
+      headers: {
+        "User-Agent": "psy-dbase/1.0",
+        Accept: "text/plain",
+      },
+    });
+
+    const body = await res.text();
+    console.log("[tinyurl] status:", res.status);
+    console.log("[tinyurl] body:", body.slice(0, 120));
+
+    if (!res.ok || !body.startsWith("http")) {
+      return longUrl;
+    }
+
+    return body.trim();
+  } catch (err) {
+    console.warn("[tinyurl] erro:", err);
+    return longUrl;
+  }
 }
