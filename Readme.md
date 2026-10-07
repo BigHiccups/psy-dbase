@@ -1,193 +1,241 @@
-# Psychology Practice Manager
+# psy-dbase
 
-Sistema web de gestão para psicólogo autônomo. Cobre cadastro de pacientes,
-agenda integrada ao Google Calendar + Meet, prontuário com evolução SOAP,
-financeiro com entradas/saídas categorizadas, recibos e relatórios.
+Backend do **psy-dbase** — sistema de gestão para psicólogo autônomo.
+
+Responsável por tudo que exige **segredos** ou **integrações externas**:
+autenticação administrativa, geração de convites com encurtamento de URL,
+integração com Google Calendar + Meet, envio de WhatsApp/e-mail, geração de
+PDF de recibo e transcrição de áudio.
+
+> **Repositório irmão:** `psy-dbase-front` (React + Tailwind)
 
 ## Stack
 
-| Camada         | Tecnologia                                      |
-|----------------|-------------------------------------------------|
-| Frontend       | React + Tailwind CSS (deploy: Vercel)           |
-| Backend        | Node.js + TypeScript (deploy: a definir)        |
-| Banco / Auth   | Supabase (Postgres + Auth + Storage + RLS)      |
-| Autenticação   | Supabase Auth com Google OAuth                  |
-| Calendário     | Google Calendar API + Google Meet               |
-| Notificações   | WhatsApp API + E-mail (a definir provedor)      |
-| Repositório    | GitHub                                          |
+| Camada        | Tecnologia                                  |
+|---------------|---------------------------------------------|
+| Runtime       | Node 20.x                                   |
+| Framework     | Express 5                                   |
+| Linguagem     | TypeScript 5.9                              |
+| Execução dev  | tsx watch                                   |
+| Banco / Auth  | Supabase (Postgres + Auth + Storage)        |
+| SDK Supabase  | `@supabase/supabase-js` (com `service_role`)|
+| WebSocket     | `ws` (Node 20 não tem nativo; ver seção)    |
+| Encurtador    | TinyURL (API pública, sem chave)            |
+| Deploy        | a definir (Render / Railway / Fly.io)       |
+| Gerenciador   | npm                                         |
 
-> **Idioma do código:** nomes de variáveis, funções, tipos e arquivos em
-> inglês. Comentários em português.
+> **Idioma do código:** variáveis, funções, tipos e nomes de arquivo em inglês.
+> Comentários em português.
 
 ## Arquitetura
 
 ```
-[React + Tailwind]  →  [Supabase JS Client]  →  [Supabase Postgres + RLS]
-        │
-        └──→  [Node API]  →  [Google Calendar / Meet]
-                          →  [WhatsApp / E-mail]
-                          →  [Storage de áudio / PDFs]
+[Frontend React]
+       │  (JWT do usuário no header Authorization)
+       ▼
+[API Node / Express]  ──→  [Supabase Admin (service_role)]
+       │                        (ignora RLS, escreve em qualquer tabela)
+       │
+       ├──→  [Google Calendar / Meet]      (Fase 3)
+       ├──→  [WhatsApp / E-mail]           (Fase 6)
+       ├──→  [Geração de PDF de recibo]    (Fase 5)
+       └──→  [Transcrição de áudio]        (Fase 4, provedor a decidir)
 ```
 
-- **Leitura e escrita de dados:** o frontend fala **direto** com o Supabase
-  (via `@supabase/supabase-js`). RLS garante isolamento por psicólogo.
-- **Backend Node:** usado apenas para operações que exigem segredos
-  (Google OAuth, criação de eventos, envio de WhatsApp/e-mail, geração de
-  recibo em PDF, transcrição de áudio).
-- **Multi-tenant:** um psicólogo por conta. `user_id` do Supabase é a chave
-  de isolamento em todas as tabelas.
+- **Multi-tenant:** um psicólogo por conta. `auth.uid()` do JWT é a chave de
+  isolamento.
+- **`service_role`** só existe aqui. Nunca vai para o frontend.
+- **RLS:** o backend ignora via `service_role`, mas ainda assim **toda tabela
+  precisa de GRANT** para `service_role` funcionar (ver armadilhas no
+  `CONTEXT.md`).
+
+## Estrutura de pastas
+
+```
+src/
+├── config/
+│   └── env.ts                 # valida e exporta variáveis de ambiente
+├── lib/
+│   ├── supabase.ts            # cliente admin (service_role)
+│   └── tinyurl.ts             # encurtador com fallback
+├── middlewares/
+│   ├── auth.ts                # valida JWT do Supabase, injeta req.userId
+│   └── errorHandler.ts        # tratamento centralizado de erros
+├── modules/
+│   └── invites/
+│       ├── invites.controller.ts
+│       ├── invites.service.ts
+│       └── invites.routes.ts
+├── utils/
+│   ├── phone.ts               # normaliza para formato internacional (55…)
+│   └── whatsapp.ts            # monta link wa.me com mensagem
+├── app.ts                     # configura Express
+└── server.ts                  # sobe o servidor
+```
+
+## Rodando localmente
+
+### 1. Pré-requisitos
+
+- Node 20.x
+- npm 10+
+- Projeto Supabase configurado (mesmo do frontend)
+
+### 2. Instalar
+
+```bash
+npm install
+```
+
+### 3. Variáveis de ambiente
+
+Crie `.env` na raiz com:
+
+```env
+PORT=3333
+SUPABASE_URL=https://SEU-PROJETO.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJ...service_role_key
+FRONTEND_URL=http://localhost:5173
+CORS_ORIGINS=http://localhost:5173,https://seu-app.vercel.app
+```
+
+| Variável                     | Onde encontrar                                        |
+|------------------------------|-------------------------------------------------------|
+| `SUPABASE_URL`               | Supabase → Settings → API → Project URL               |
+| `SUPABASE_SERVICE_ROLE_KEY`  | Supabase → Settings → API → `service_role` **secret** |
+| `FRONTEND_URL`               | URL pública do frontend (usada para montar links)     |
+| `CORS_ORIGINS`               | Lista separada por vírgula; origens permitidas        |
+
+> ⚠️ **`service_role` ignora RLS e GRANT.** Ela só existe aqui. Nunca no
+> frontend, nunca em log, nunca em chat. Se vazar, rotacione imediatamente em
+> Supabase → Settings → API → Reset.
+
+### 4. Rodar
+
+```bash
+npm run dev
+```
+
+Servidor sobe em `http://localhost:3333`.
+
+### 5. Testar
+
+```bash
+curl http://localhost:3333/health
+# {"ok":true}
+```
+
+## Scripts
+
+| Comando         | O que faz                          |
+|-----------------|------------------------------------|
+| `npm run dev`   | Dev server com hot reload (`tsx`)  |
+| `npm run build` | Compila TypeScript para `dist/`    |
+| `npm start`     | Roda o build (`node dist/server.js`) |
+
+## Endpoints
+
+### `GET /health`
+
+Health check. Sem autenticação.
+
+```bash
+curl http://localhost:3333/health
+# {"ok":true}
+```
+
+### `POST /invites`
+
+Cria um convite de paciente, gera URL curta e devolve o link do WhatsApp
+pronto. Requer autenticação (JWT do Supabase).
+
+**Headers:**
+```
+Authorization: Bearer <access_token_do_usuario>
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{
+  "patientNameHint": "Maria Silva",
+  "phone": "(11) 99999-9999"
+}
+```
+
+- `patientNameHint` — opcional, aparece no formulário público
+- `phone` — obrigatório, aceita vários formatos; normalizado para E.164 (`55…`)
+
+**Resposta 201:**
+```json
+{
+  "inviteId": "uuid",
+  "token": "uuid",
+  "publicUrl": "http://localhost:5173/form/uuid",
+  "shortUrl": "https://tinyurl.com/xxxxx",
+  "whatsappUrl": "https://wa.me/5511999999999?text=...",
+  "phone": "5511999999999"
+}
+```
+
+**Erros:**
+
+| Status | Motivo                                    |
+|--------|-------------------------------------------|
+| 400    | Telefone ausente ou inválido              |
+| 401    | Token ausente ou inválido                 |
+| 400    | Falha ao criar convite (erro do Supabase) |
+
+## Autenticação
+
+- O backend **valida** o JWT do Supabase em `requireAuth`.
+- Não gera token — quem gera é o Supabase Auth (login Google no frontend).
+- Usa `supabaseAdmin.auth.getUser(token)` para validar.
+- Injeta `req.userId` com o `id` do usuário autenticado.
+
+## Node 20 e WebSocket
+
+O `@supabase/supabase-js` v2 inicializa o cliente Realtime (WebSocket) por
+padrão. Node 20 **não tem WebSocket nativo** (só Node 22+). Por isso o pacote
+`ws` está instalado e é passado via `transport`:
+
+```ts
+import ws from "ws";
+createClient(url, key, {
+  realtime: { transport: ws as any },
+});
+```
+
+Sem isso, o servidor quebra ao subir com:
+`Error: Node.js 20 detected without native WebSocket support.`
+
+## CORS
+
+Aceita múltiplas origens via `CORS_ORIGINS` (separadas por vírgula). O
+`FRONTEND_URL` é usado **apenas** para montar a URL do formulário público —
+não confundir com CORS.
+
+## Deploy
+
+A definir (Render / Railway / Fly.io). Após o deploy:
+
+1. Adicionar o domínio do backend em `CORS_ORIGINS` no `.env`
+2. Adicionar o domínio do backend em `FRONTEND_URL` no `.env` do frontend
+3. Garantir que as variáveis de ambiente estão configuradas no painel do host
 
 ## Conformidade
 
-- **LGPD:** dado sensível de saúde. Consentimento explícito, criptografia em
-  repouso e em trânsito, direito ao esquecimento, trilha de auditoria.
-- **Sigilo profissional:** acesso ao prontuário apenas por link com hash
-  expirável. Sem indexação, sem cache.
-- **Auditoria:** toda leitura de prontuário é registrada em `audit_log`.
+- **LGPD:** dado sensível de saúde. O backend apenas processa o que o frontend
+  e o Supabase já isolam via RLS.
+- **`service_role`:** ignora RLS, então **toda query precisa filtrar por
+  `user_id`** manualmente. Nunca confie que o RLS vai proteger uma query feita
+  com `service_role`.
 
-## Requisitos Funcionais
+## Documentos relacionados
 
-### RF01 — Cadastro de pacientes
-- Formulário público (fora do sistema autenticado), acessível por link.
-- **Link único por paciente, com token seguro.**
-- Campos: nome, CPF, cidade, nascimento, telefone, contato de urgência.
-- Termo de confidencialidade assinado pelo paciente.
-- Após envio, registro entra como **pendente** e o psicólogo aprova.
-
-### RF02 — Agenda + Google Calendar + Meet
-- Integração **obrigatória** com Google Calendar do psicólogo.
-- Integração com agenda do paciente é **opcional**.
-- Sessão pode ter N participantes (paciente, acompanhante, co-psicólogo,
-  terapia de casal) — **configurável**.
-- Sala do Meet sugerida automaticamente quando o atendimento for remoto.
-- Se o atendimento for presencial via WhatsApp, o Meet não é gerado.
-- Psicólogo e paciente recebem o link do Meet quando aplicável.
-
-### RF03 — Prontuário
-- Dados do formulário inicial integrados ao prontuário.
-- **Anamnese inicial:** queixa principal, suspeita diagnóstica, histórico de
-  saúde, medicações em uso, hábitos de vida.
-- **Contato inicial.**
-- **Registro de evolução por sessão (SOAP + Atuação):**
-  - **S**ubjetivo — relato do paciente.
-  - **O**bjetivo — observações e sinais.
-  - **A**valiação — análise profissional.
-  - **P**lano — próximos passos.
-  - **Atuação do psicólogo** — o que foi feito na sessão.
-- **Transcrição de áudio da sessão** (integração futura — depende de provedor
-  com custo aceitável; Whisper pago está em avaliação).
-- **Palavras e sentenças importantes** destacadas.
-- **Compartilhamento por link com hash expirável:** ao expirar, o hash fica
-  inválido e o registro some da visualização.
-
-### RF04 — Financeiro
-- **Entradas** (sessões pagas/recebidas):
-  `Data da Sessão | Nº da Sessão | Status da Sessão | Forma de Pagamento |
-   Dia do Pagamento | Status do Pagamento | Valor Pago | Atendimentos |
-   Total Recebido`
-- **Saídas categorizadas** (gastos do consultório):
-  `Nome do Serviço | Forma de Pagamento | Dia do Pagamento |
-   Status do Pagamento | Valor Pago | Total Gasto`
-- **Gastos específicos** (ex.: terapia pessoal do psicólogo):
-  `Data da Sessão | Status da Sessão | Forma de Pagamento | Dia do Pagamento |
-   Status do Pagamento | Valor Pago | Atendimentos | Total Pago`
-- Alertas de vencimento.
-- Pagamentos à vista, antecipados, por sessão ou por pacote.
-- Emissão de recibo (PDF).
-
-### RF05 — Relatórios
-- Entradas x saídas.
-- Quantidade de pacientes novos.
-- Evoluções registradas.
-- Ocupação da agenda.
-- Faturamento por período.
-
-### RF06 — Regras configuráveis
-- Duração padrão da sessão (default: 50 min).
-- Política de remarcação (horas mínimas de antecedência).
-- Multa por falta (valor fixo ou percentual).
-
-### RF07 — Notificações
-- Lembretes por WhatsApp.
-- Lembretes por e-mail.
-- A definir provedor de WhatsApp (Cloud API oficial vs. intermediário).
-
-## Requisitos Não Funcionais
-
-- RLS obrigatório em todas as tabelas sensíveis.
-- Links de prontuário: hash opaco (UUID v4) + expiração.
-- Sem indexação (robots, headers) em páginas de prontuário e formulário.
-- Criptografia em repouso (Supabase) e em trânsito (HTTPS).
-- Auditoria de acesso ao prontuário.
-- Compatível com LGPD.
-
-## Modelo de Dados (esboço)
-
-```
-profiles                  — espelha auth.users (psicólogo)
-patients
-patient_invites           — link único por paciente (token)
-patient_form_submissions  — dados do formulário antes da aprovação
-consent_terms
-anamnesis
-appointments              — agenda + google_event_id + meet_link
-appointment_attendees     — N participantes por atendimento
-sessions                  — sessão realizada
-evolutions                — SOAP + atuação
-evolution_audio           — transcrição
-evolution_keywords
-share_links               — hash expirável do prontuário
-incomes
-expenses
-expense_categories
-session_payments
-personal_therapy          — gastos do psicólogo como paciente
-receipts
-reminders
-audit_log
-settings                  — duração padrão, política de remarcação, multa
-```
-
-## Fases do Projeto
-
-1. **Fase 1 — Fundação:** Supabase, Auth Google, RLS base, layout React +
-   Tailwind, rota protegida.
-2. **Fase 2 — Pacientes + Formulário público.**
-3. **Fase 3 — Agenda + Google Calendar + Meet.**
-4. **Fase 4 — Prontuário + Anamnese + Evolução SOAP + Áudio.**
-5. **Fase 5 — Financeiro + Recibos + Relatórios.**
-6. **Fase 6 — Notificações + Share links expiráveis.**
-
-## Decisões Pendentes
-
-| # | Ponto | Status |
-|---|-------|--------|
-| P3 | Definir se "duas pessoas" é configurável por tipo de atendimento | ✅ configurável |
-| P4 | Provedor de transcrição de áudio | ❓ Whisper pago em avaliação |
-| P5 | Assinatura do termo: canvas ou upload de PDF | ❓ pendente |
-| P6 | Layout do recibo em PDF | ❓ pendente |
-| P7 | Provedor de WhatsApp (Cloud API oficial vs. intermediário) | ❓ pendente |
-| P8 | Quem pode ver o prontuário pelo link — qualquer portador ou e-mail autorizado | ❓ pendente |
-| —  | Host do backend Node | ❓ pendente |
-
-## Estrutura do Repositório (proposta)
-
-```
-psychology-practice-manager/
-├── apps/
-│   ├── web/              # React + Tailwind (Vercel)
-│   └── api/              # Node + TypeScript (integrações)
-├── packages/
-│   └── shared/           # tipos e validações compartilhadas
-├── supabase/
-│   ├── migrations/       # SQL versionado
-│   └── seed/
-├── docs/
-│   ├── README.md
-│   ├── TODO.md
-│   └── data-model.md
-└── package.json
-```
+- [`TODO.md`](./TODO.md) — tarefas pendentes por fase
+- [`CONTEXT.md`](./CONTEXT.md) — contexto para IA: arquitetura, decisões, padrões
+- [`../psy-dbase-front/CONTEXT.md`](../psy-dbase-front/CONTEXT.md) — contexto do frontend
 
 ## Licença
 

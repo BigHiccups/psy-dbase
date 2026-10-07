@@ -1,0 +1,31 @@
+{
+  "name": "psy-dbase",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Sistema web de gestão para psicólogo autônomo. Cobre cadastro de pacientes, agenda integrada ao Google Calendar + Meet, prontuário com evolução SOAP, financeiro com entradas/saídas categorizadas, recibos e relatórios.",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.109.0",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.6",
+    "express": "^5.2.1",
+    "lucide-react": "^1.52.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
