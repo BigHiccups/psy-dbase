@@ -36,7 +36,7 @@ export async function handleCallback(code: string, userId: string) {
   if (!tokens.refresh_token) {
     throw new Error(
       "O Google não retornou refresh_token. " +
-        "Remova o acesso do app em myaccount.google.com/permissions e tente novamente."
+      "Remova o acesso do app em myaccount.google.com/permissions e tente novamente."
     );
   }
 
@@ -144,4 +144,165 @@ export async function listEvents(
   });
 
   return res.data.items ?? [];
+}
+
+// =========================================================
+// Importação da agenda do Google
+// =========================================================
+
+type ImportResult = {
+  importedEvents: number;
+  importedAppointments: number;
+  importedPatients: number;
+  skipped: number;
+  patients: { id: string; full_name: string }[];
+};
+
+// Cria a agenda recorrente no psy-dbase a partir dos eventos do Google
+// - Cria um patient provisório (status='prospect') para cada recorrência
+// - Cria N appointments (um por ocorrência no período)
+// - Idempotente: pula ocorrências cujo google_event_id já existe,
+//   e reutiliza o paciente provisório se já existir um com o mesmo nome
+export async function importCalendarEvents(
+  userId: string,
+  daysAhead = 90
+): Promise<ImportResult> {
+  const now = new Date();
+  const end = new Date();
+  end.setDate(end.getDate() + daysAhead);
+
+  const events = await listEvents(
+    userId,
+    now.toISOString(),
+    end.toISOString()
+  );
+
+  // Agrupa por recurringEventId (eventos avulsos viram seu próprio grupo)
+  const groups = new Map<string, typeof events>();
+  for (const ev of events) {
+    const key = ev.recurringEventId ?? ev.id ?? "";
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(ev);
+  }
+
+  const result: ImportResult = {
+    importedEvents: events.length,   // ← agora conta corretamente
+    importedAppointments: 0,
+    importedPatients: 0,
+    skipped: 0,
+    patients: [],
+  };
+
+  for (const [, group] of groups) {
+    const first = group[0];
+
+    if (!first.start?.dateTime || !first.end?.dateTime) continue;
+
+    const start = new Date(first.start.dateTime);
+    const endDt = new Date(first.end.dateTime);
+
+    const weekday = start.getDay();
+    const startTime = `${String(start.getHours()).padStart(2, "0")}:${String(
+      start.getMinutes()
+    ).padStart(2, "0")}`;
+    const durationMin = Math.round(
+      (endDt.getTime() - start.getTime()) / 60000
+    );
+
+    const rawName = first.summary ?? "Sem nome";
+
+    // Idempotência do paciente: reutiliza se já existe um prospect com esse nome
+    const { data: existingPatient } = await supabaseAdmin
+      .from("patients")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("full_name", rawName)
+      .eq("status", "prospect")
+      .maybeSingle();
+
+    let patientId: string;
+    if (existingPatient) {
+      patientId = existingPatient.id;
+    } else {
+      const { data: patient, error: patientError } = await supabaseAdmin
+        .from("patients")
+        .insert({
+          user_id: userId,
+          full_name: rawName,
+          status: "prospect",
+        })
+        .select()
+        .single();
+
+      if (patientError || !patient) {
+        console.warn(
+          "[calendar.import] falha ao criar paciente:",
+          patientError?.message
+        );
+        continue;
+      }
+
+      patientId = patient.id;
+      result.importedPatients++;
+      result.patients.push({ id: patientId, full_name: rawName });
+    }
+
+    // Cria os appointments (um por ocorrência)
+    const rows = group
+      .filter((ev) => ev.id && ev.start?.dateTime && ev.end?.dateTime)
+      .map((ev) => {
+        const occStart = new Date(ev.start!.dateTime!);
+        const occDate = `${occStart.getFullYear()}-${String(
+          occStart.getMonth() + 1
+        ).padStart(2, "0")}-${String(occStart.getDate()).padStart(2, "0")}`;
+
+        return {
+          user_id: userId,
+          patient_id: patientId,
+          type: "session" as const,
+          weekday,
+          start_time: startTime,
+          duration_min: durationMin,
+          starts_on: occDate,
+          ends_on: occDate,
+          is_recurring: true,
+          status: "active" as const,
+          google_event_id: ev.id!,
+        };
+      });
+
+    // Idempotência dos appointments
+    const existingIds = rows.map((r) => r.google_event_id);
+    const { data: existing } = await supabaseAdmin
+      .from("appointments")
+      .select("google_event_id")
+      .in("google_event_id", existingIds);
+
+    const existingSet = new Set(
+      (existing ?? []).map((e) => e.google_event_id)
+    );
+
+    const newRows = rows.filter((r) => !existingSet.has(r.google_event_id));
+
+    result.skipped += rows.length - newRows.length;
+
+    if (newRows.length === 0) continue;
+
+    const { error: apptError, count } = await supabaseAdmin
+      .from("appointments")
+      .insert(newRows, { count: "exact" });
+
+    if (apptError) {
+      console.warn(
+        "[calendar.import] falha ao criar appointments:",
+        apptError.message
+      );
+      continue;
+    }
+
+    result.importedAppointments += count ?? newRows.length;
+  }
+
+  return result;
 }

@@ -5,6 +5,7 @@ import {
   getConnectionStatus,
   disconnect,
   listEvents,
+  importCalendarEvents,
 } from "./calendar.service.js";
 import { env } from "../../config/env.js";
 
@@ -69,4 +70,14 @@ export async function handleListEvents(req: Request, res: Response) {
 
   const events = await listEvents(userId, from, to);
   return res.json({ events });
+}
+
+// POST /calendar/import
+// Importa a agenda do Google para o psy-dbase
+export async function handleImport(req: Request, res: Response) {
+  const userId = (req as any).userId as string;
+  const daysAhead = Number(req.body?.daysAhead ?? 90);
+
+  const summary = await importCalendarEvents(userId, daysAhead);
+  return res.json(summary);
 }

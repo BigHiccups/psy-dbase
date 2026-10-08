@@ -6,6 +6,7 @@ import {
   handleStatus,
   handleDisconnect,
   handleListEvents,
+  handleImport,         
 } from "./calendar.controller.js";
 
 export const calendarRoutes = Router();
@@ -18,4 +19,5 @@ calendarRoutes.get("/callback", handleOAuthCallback);
 calendarRoutes.get("/connect", requireAuth, handleConnect);
 calendarRoutes.get("/status", requireAuth, handleStatus);
 calendarRoutes.get("/events", requireAuth, handleListEvents);
+calendarRoutes.post("/import", requireAuth, handleImport); 
 calendarRoutes.delete("/disconnect", requireAuth, handleDisconnect);
