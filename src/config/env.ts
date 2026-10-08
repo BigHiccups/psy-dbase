@@ -11,6 +11,7 @@ export const env = {
   supabaseUrl: required("SUPABASE_URL"),
   supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
   frontendUrl: required("FRONTEND_URL"),
+  tinyurlApiToken: required("TINYURL_API_TOKEN"), // ← Adicionar
   corsOrigins: (process.env.CORS_ORIGINS ?? process.env.FRONTEND_URL ?? "")
     .split(",")
     .map((o) => o.trim())
