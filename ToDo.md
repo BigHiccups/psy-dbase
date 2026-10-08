@@ -6,8 +6,10 @@
 **Legenda:** `[ ]` pendente · `[~]` em andamento · `[x]` concluído · `[!]` bloqueado
 
 **Branches ativas:**
-- Backend: `feature/form-creation`
-- Frontend: `feat/design-imp`
+- Backend: `main`
+- Frontend: `main`
+
+**URL de produção:** `https://psy-dbase.vercel.app`
 
 ---
 
@@ -15,11 +17,14 @@
 
 Ordem sugerida para a próxima sessão de trabalho:
 
-1. **`POST /invites` aceitar `schedules`** — horários das sessões são regra de
-   negócio obrigatória no convite
-2. **Deploy do backend** — escolher host (Render / Railway / Fly.io) e subir
-3. **Atualizar `CORS_ORIGINS` e `FRONTEND_URL`** no `.env` de produção após o
-   deploy do frontend e do backend
+1. **Log estruturado** — substituir `console.log` por logger com níveis
+   (`pino` ou similar), essencial para debugar problemas em produção sem
+   depender dos logs brutos da Vercel
+2. **Rate limiting nas rotas públicas** — `POST /invites` é autenticado, mas
+   `/health` e futuras rotas públicas precisam de proteção contra abuso
+3. **Validação de input com Zod** — hoje a validação é manual em
+   `invites.validation.ts`; migrar para Zod reduz código e melhora mensagens
+   de erro
 
 ---
 
@@ -38,64 +43,21 @@ Ordem sugerida para a próxima sessão de trabalho:
 
 ---
 
-## Fase 2 — Convites de Paciente
+## Fase 2 — Convites de Paciente ✅
 
-### Concluído
-
-- [x] Módulo `invites` (controller / service / routes)
+- [x] Módulo `invites` (controller / service / routes / types / validation)
 - [x] `POST /invites` autenticado
 - [x] Normalização de telefone BR → E.164 (`5511999999999`)
-- [x] Encurtamento de URL via TinyURL com fallback silencioso
-- [x] `User-Agent` na chamada do TinyURL (evita bloqueio)
+- [x] Encurtamento de URL via **API oficial do TinyURL** com fallback
+- [x] `User-Agent` na chamada do TinyURL
 - [x] Montagem de link `wa.me` com mensagem pré-formatada
 - [x] Criação de registro em `patient_invites` com token UUID
-
-### Pendente — horários das sessões
-
-Regra de negócio: o psicólogo **precisa** definir os horários antes de enviar
-o convite. Múltiplos dias por semana, um horário por dia, duração configurável
-(default 50 min herdado de `profiles.default_session_duration_minutes`).
-
-- [ ] **SQL:** criar tabela `patient_invite_schedules`
-  ```sql
-  create table public.patient_invite_schedules (
-    id uuid primary key default gen_random_uuid(),
-    invite_id uuid not null references public.patient_invites(id) on delete cascade,
-    weekday int not null check (weekday between 0 and 6),  -- 0=domingo
-    start_time time not null,
-    duration_min int not null default 50,
-    created_at timestamptz not null default now()
-  );
-  create index patient_invite_schedules_invite_idx on public.patient_invite_schedules(invite_id);
-  alter table public.patient_invite_schedules enable row level security;
-  -- Policies: select/insert via invite.user_id = auth.uid()
-  grant select, insert, update, delete on public.patient_invite_schedules to authenticated;
-  grant select, insert, update, delete on public.patient_invite_schedules to service_role;
-  ```
-- [ ] **`invites.service.ts`:** aceitar `schedules` no input
-- [ ] **Validação:** pelo menos 1 horário obrigatório
-- [ ] **Validação:** `weekday` entre 0 e 6; `startTime` em formato `HH:MM`
-- [ ] **Validação:** `durationMin` entre 15 e 120 (a definir faixa exata)
-- [ ] **Inserir** os horários em transação com o convite
-- [ ] **Atualizar RPC `get_invite_by_token`** para também retornar os horários
-      (o formulário público exibe em modo leitura)
-- [ ] **Atualizar `InviteResponse`** no backend: incluir `schedules` no retorno
-      (opcional, o frontend já tem os dados que enviou)
-- [ ] **Atualizar `.env.example`** se surgir variável nova (não deve surgir)
-
-### Pendente — integração com o frontend
-
-- [ ] Confirmar que o `InvitePatientModal` do frontend já envia `schedules` no
-      body do `POST /invites`
-- [ ] Confirmar que o `PublicForm` mostra os horários em modo leitura
-- [ ] Confirmar que o `PublicForm` tem checkbox de orientação sobre o local
-      ("ambiente tranquilo, silencioso e privado")
-
-### Pendente — robustez
-
-- [ ] Limitar número de convites por usuário (anti-abuso)
-- [ ] Rate limiting nas rotas públicas
-- [ ] Log estruturado (hoje é `console.log`)
+- [x] **Tabela `patient_invite_schedules`** com RLS + GRANTs
+- [x] **`schedules` obrigatórios** no convite (regra de negócio)
+- [x] **`validateSchedules`** — dia 0–6, `HH:MM`, duração 15–240, sem duplicata
+- [x] Inserção dos horários em transação com rollback manual
+- [x] RPC `get_invite_by_token` retorna `schedules` em JSON
+- [x] Migração do TinyURL legado (`api-create.php`) para API oficial
 
 ---
 
@@ -103,9 +65,9 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 
 ### Backend
 
-- [ ] OAuth do Google para o psicólogo (fluxo separado do login via Supabase)
+- [ ] OAuth do Google para o psicólogo (fluxo separado do login Supabase)
 - [ ] Armazenar `refresh_token` do Google com segurança (tabela
-      `google_credentials` ou similar, criptografada)
+      `google_credentials` criptografada)
 - [ ] Endpoint `POST /calendar/connect` — inicia o fluxo OAuth
 - [ ] Endpoint `GET /calendar/callback` — recebe o `code` e salva credenciais
 - [ ] Endpoint `POST /appointments` — cria evento no Calendar do psicólogo
@@ -134,6 +96,8 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 - [ ] Integração com Supabase Storage para guardar o áudio
 - [ ] Limite de tamanho de arquivo
 - [ ] Custo por minuto de áudio (validar viabilidade)
+- [ ] ⚠️ Atenção: funções serverless da Vercel têm timeout (10s no plano
+      gratuito) — processar áudio longo pode exigir host diferente ou fila
 
 ---
 
@@ -158,7 +122,7 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 - [ ] Configurar credenciais
 - [ ] Templates de mensagem aprovados (se for Meta)
 - [ ] Endpoint `POST /notifications/whatsapp`
-- [ ] Fila de envio (BullMQ, ou similar) para não travar a API
+- [ ] Fila de envio (BullMQ ou similar) para não travar a API
 - [ ] Retry em caso de falha
 - [ ] Log de envios por paciente
 
@@ -179,16 +143,6 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 
 ## Transversal — Infra e qualidade
 
-### Deploy
-
-- [ ] Escolher host (Render / Railway / Fly.io)
-- [ ] Configurar variáveis de ambiente no host
-- [ ] Configurar domínio (se houver)
-- [ ] Atualizar `CORS_ORIGINS` com a URL do frontend em produção
-- [ ] Atualizar `FRONTEND_URL` com a URL do frontend em produção
-- [ ] Adicionar URL do backend no `.env` do frontend (`VITE_API_URL`)
-- [ ] CI/CD (GitHub Actions) — build automático no push
-
 ### Observabilidade
 
 - [ ] Log estruturado (hoje é `console.log`)
@@ -202,7 +156,6 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 - [ ] Validação de input com Zod (ou similar)
 - [ ] Revisar todas as queries com `service_role` para garantir filtro por
       `user_id`
-- [ ] Rotacionar `service_role` se houver suspeita de vazamento
 
 ### Testes
 
@@ -210,17 +163,24 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 - [ ] Testes de integração das rotas autenticadas
 - [ ] Mock do Supabase nos testes
 
+### Deploy
+
+- [ ] CI/CD (GitHub Actions) — build automático no push
+- [ ] Avaliar quando migrar para Node 22 (permite remover o pacote `ws`)
+- [ ] Avaliar host dedicado se as funções serverless da Vercel ficarem
+      limitantes (timeout, cold start, tamanho de payload)
+
 ---
 
 ## Decisões pendentes
 
-- [ ] Host do backend (Render / Railway / Fly.io) — **bloqueia deploy**
 - [ ] Provedor de WhatsApp (Cloud API vs. intermediário) — afeta Fase 6
 - [ ] Provedor de e-mail (Resend / SES / Postmark) — afeta Fase 6
 - [ ] Provedor de transcrição de áudio — afeta Fase 4
 - [ ] Biblioteca de geração de PDF — afeta Fase 5
 - [ ] Layout do recibo — afeta Fase 5
-- [ ] Quando versionar migrations SQL (hoje são rodadas manualmente no SQL Editor)
+- [ ] Quando versionar migrations SQL (hoje são rodadas manualmente no SQL
+      Editor)
 - [ ] Quando subir para Node 22 (permite remover o pacote `ws`)
 
 ---
@@ -228,8 +188,10 @@ o convite. Múltiplos dias por semana, um horário por dia, duração configurá
 ## Concluído (registro histórico)
 
 - **Fase 1 completa:** Express + TS + ESM, `env.ts` validando, `supabaseAdmin`
-  com `ws` para Node 20, `requireAuth`, `errorHandler`, CORS configurável
-- **Fase 2 parcial:** `POST /invites` cria convite, normaliza telefone,
-  encurta URL via TinyURL (com fallback), monta link `wa.me` com mensagem
-  pré-formatada
-- **Endpoints em produção:** nenhum (só local)
+  com `ws`, `requireAuth`, `errorHandler`, CORS configurável
+- **Fase 2 completa:** `POST /invites` com `schedules` obrigatórios, validação,
+  TinyURL API oficial, `wa.me`, tabela `patient_invite_schedules` com RLS +
+  GRANTs
+- **Deploy em produção:** Vercel, `vercel.json` com `@vercel/node`,
+  `server.ts` adaptado para serverless
+- **Segurança:** `service_role` rotacionada após vazar em chat
