@@ -1,13 +1,8 @@
 # TODO.md — psy-dbase (backend)
 
-> Tarefas pendentes, organizadas por fase. Espelha a estrutura do `TODO.md` do
-> frontend `psy-dbase-front`.
+> Tarefas pendentes, organizadas por fase.
 
 **Legenda:** `[ ]` pendente · `[~]` em andamento · `[x]` concluído · `[!]` bloqueado
-
-**Branches ativas:**
-- Backend: `main`
-- Frontend: `main`
 
 **URL de produção:** `https://psy-dbase.vercel.app`
 
@@ -15,183 +10,161 @@
 
 ## 🎯 Próximos 3 passos
 
-Ordem sugerida para a próxima sessão de trabalho:
-
-1. **Log estruturado** — substituir `console.log` por logger com níveis
-   (`pino` ou similar), essencial para debugar problemas em produção sem
-   depender dos logs brutos da Vercel
-2. **Rate limiting nas rotas públicas** — `POST /invites` é autenticado, mas
-   `/health` e futuras rotas públicas precisam de proteção contra abuso
-3. **Validação de input com Zod** — hoje a validação é manual em
-   `invites.validation.ts`; migrar para Zod reduz código e melhora mensagens
-   de erro
+1. **Escrever no Google Calendar** — ao criar `appointments` no psy-dbase,
+   criar evento no Google (`events.insert`); ao cancelar, remover. Fecha o
+   ciclo bidirecional.
+2. **Link do Meet automático** — gerar `conferenceData` ao criar evento no
+   Google, salvar `hangoutLink` no `appointments`.
+3. **Cron job para estender horizonte** — renovar `appointments` recorrentes
+   quando estiverem a menos de 30 dias do fim.
 
 ---
 
 ## Fase 1 — Fundação ✅
 
 - [x] Setup Node 20 + Express 5 + TypeScript ESM
-- [x] `tsconfig.json` configurado
-- [x] `env.ts` com validação de variáveis obrigatórias
-- [x] `supabaseAdmin` com `service_role` + `ws` (Node 20)
-- [x] `requireAuth` validando JWT do Supabase
+- [x] `env.ts` com validação
+- [x] `supabaseAdmin` com `service_role` + `ws`
+- [x] `requireAuth` validando JWT
 - [x] `errorHandler` centralizado
 - [x] `GET /health`
-- [x] CORS configurável via lista
+- [x] CORS configurável
 - [x] `FRONTEND_URL` separado de `CORS_ORIGINS`
-- [x] Repositório no GitHub
 
 ---
 
-## Fase 2 — Convites de Paciente ✅
+## Fase 2 — Convites ✅
 
-- [x] Módulo `invites` (controller / service / routes / types / validation)
+- [x] Módulo `invites`
 - [x] `POST /invites` autenticado
-- [x] Normalização de telefone BR → E.164 (`5511999999999`)
-- [x] Encurtamento de URL via **API oficial do TinyURL** com fallback
-- [x] `User-Agent` na chamada do TinyURL
-- [x] Montagem de link `wa.me` com mensagem pré-formatada
-- [x] Criação de registro em `patient_invites` com token UUID
-- [x] **Tabela `patient_invite_schedules`** com RLS + GRANTs
-- [x] **`schedules` obrigatórios** no convite (regra de negócio)
-- [x] **`validateSchedules`** — dia 0–6, `HH:MM`, duração 15–240, sem duplicata
-- [x] Inserção dos horários em transação com rollback manual
-- [x] RPC `get_invite_by_token` retorna `schedules` em JSON
-- [x] Migração do TinyURL legado (`api-create.php`) para API oficial
+- [x] Normalização de telefone BR → E.164
+- [x] TinyURL oficial com fallback
+- [x] Link `wa.me`
+- [x] `schedules` obrigatórios com validação
+- [x] Tabela `patient_invite_schedules`
 
 ---
 
-## Fase 3 — Google Calendar + Meet
+## Fase 3 — Agenda + Google Calendar
 
-### Backend
+### ✅ Concluído — Integração Google (leitura + importação)
 
-- [ ] OAuth do Google para o psicólogo (fluxo separado do login Supabase)
-- [ ] Armazenar `refresh_token` do Google com segurança (tabela
-      `google_credentials` criptografada)
-- [ ] Endpoint `POST /calendar/connect` — inicia o fluxo OAuth
-- [ ] Endpoint `GET /calendar/callback` — recebe o `code` e salva credenciais
-- [ ] Endpoint `POST /appointments` — cria evento no Calendar do psicólogo
-- [ ] Incluir `conferenceData` para gerar link do Meet automaticamente
-- [ ] Suporte a N participantes (`attendees`)
-- [ ] Endpoint `PATCH /appointments/:id` — atualiza evento
-- [ ] Endpoint `DELETE /appointments/:id` — cancela evento
-- [ ] Geração de eventos recorrentes a partir de `patient_invite_schedules`
-- [ ] Renovação automática de `refresh_token` do Google
-- [ ] Tratamento de erro quando o psicólogo revoga acesso
+- [x] Tabela `appointments`
+- [x] Tabela `google_credentials`
+- [x] `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`
+- [x] OAuth Client no Google Cloud
+- [x] Escopo `.../auth/calendar` no consent screen
+- [x] Conta profissional como Test User
+- [x] Módulo `calendar`
+- [x] `GET /calendar/connect`
+- [x] `GET /calendar/callback`
+- [x] `GET /calendar/status`
+- [x] `GET /calendar/events`
+- [x] `POST /calendar/import`
+- [x] `DELETE /calendar/disconnect`
+- [x] Importação idempotente
+- [x] Status `prospect` em `patients`
 
-### Banco
+### ⏳ Pendente — Escrita no Google
 
-- [ ] Tabela `google_credentials` (user_id, refresh_token criptografado, scopes)
-- [ ] Tabela `appointments` (sincronizada com o Calendar)
-- [ ] Tabela `appointment_attendees`
+- [ ] Criar evento no Google ao criar `appointments`
+- [ ] Atualizar evento no Google ao editar `appointments`
+- [ ] Remover evento no Google ao cancelar `appointments`
+- [ ] Gerar `conferenceData` para link do Meet
+- [ ] Salvar `hangoutLink` no `appointments`
+- [ ] Convite opcional para o paciente (attendees)
+
+### ⏳ Pendente — Sincronização contínua
+
+- [ ] Webhook do Google (`watch` + `push notifications`) ou polling
+- [ ] Resolução de conflitos (psy-dbase vs. Google)
+- [ ] Retry em caso de falha
+- [ ] Renovação do canal de watch
+
+### ⏳ Pendente — Automação de agendamentos
+
+- [ ] Aprovação de submissão cria `appointments` recorrentes (12 semanas)
+- [ ] Arquivar paciente cancela `appointments` futuros
+- [ ] Reativar paciente recria `appointments` a partir de `patient_invite_schedules`
+- [ ] Botão "Encerrar tratamento" (cancela futuros, mantém histórico)
+- [ ] Cron job semanal para estender horizonte (renovar 12 semanas)
 
 ---
 
 ## Fase 4 — Transcrição de Áudio
 
-- [ ] Avaliar provedor: Whisper (OpenAI), AssemblyAI, Deepgram
-- [ ] Decidir entre upload manual e gravação no navegador
-- [ ] Endpoint `POST /transcribe` — recebe áudio, devolve texto
-- [ ] Endpoint para extrair palavras/sentenças-chave
-- [ ] Integração com Supabase Storage para guardar o áudio
-- [ ] Limite de tamanho de arquivo
-- [ ] Custo por minuto de áudio (validar viabilidade)
-- [ ] ⚠️ Atenção: funções serverless da Vercel têm timeout (10s no plano
-      gratuito) — processar áudio longo pode exigir host diferente ou fila
+- [ ] Avaliar provedor: Whisper, AssemblyAI, Deepgram
+- [ ] Endpoint `POST /transcribe`
+- [ ] Extração de palavras-chave
+- [ ] Supabase Storage para áudio
+- [ ] ⚠️ Timeout das funções Vercel (10s no free) — pode exigir host dedicado
 
 ---
 
 ## Fase 5 — Recibos em PDF
 
-- [ ] Biblioteca de geração de PDF (Puppeteer, PDFKit, react-pdf)
-- [ ] Endpoint `POST /receipts` — gera PDF a partir dos dados do pagamento
-- [ ] Layout do recibo (a decidir com o usuário)
-- [ ] Campos obrigatórios: nome do psicólogo, CRP, valor, data, descrição
-- [ ] Armazenar PDF no Supabase Storage
-- [ ] Devolver URL assinada com expiração
-- [ ] Suporte a envio por e-mail (junto com Fase 6)
+- [ ] Biblioteca de PDF
+- [ ] `POST /receipts`
+- [ ] Layout do recibo
+- [ ] Supabase Storage
+- [ ] URL assinada com expiração
 
 ---
 
 ## Fase 6 — Notificações
 
 ### WhatsApp
-
-- [ ] Decidir provedor: Cloud API oficial (Meta) vs. intermediário (Z-API,
-      Twilio)
-- [ ] Configurar credenciais
-- [ ] Templates de mensagem aprovados (se for Meta)
-- [ ] Endpoint `POST /notifications/whatsapp`
-- [ ] Fila de envio (BullMQ ou similar) para não travar a API
-- [ ] Retry em caso de falha
-- [ ] Log de envios por paciente
+- [ ] Provedor (Cloud API oficial vs. intermediário)
+- [ ] `POST /notifications/whatsapp`
+- [ ] Fila de envio
 
 ### E-mail
+- [ ] Provedor (Resend / SES / Postmark)
+- [ ] Templates transacionais
+- [ ] `POST /notifications/email`
 
-- [ ] Decidir provedor: Resend, AWS SES, Postmark
-- [ ] Configurar domínio de envio (SPF, DKIM, DMARC)
-- [ ] Templates transacionais (lembrete de sessão, alerta de vencimento)
-- [ ] Endpoint `POST /notifications/email`
-
-### Agendamento
-
-- [ ] Cron job para lembretes de sessão (24h antes, configurável)
-- [ ] Cron job para alertas de vencimento financeiro
-- [ ] Cron job para invalidar `share_links` expirados
+### Cron
+- [ ] Lembrete de sessão (24h antes)
+- [ ] Alerta de vencimento
+- [ ] Invalidar `share_links` expirados
 
 ---
 
 ## Transversal — Infra e qualidade
 
-### Observabilidade
-
-- [ ] Log estruturado (hoje é `console.log`)
-- [ ] Monitoramento de erros (Sentry)
-- [ ] Health check mais completo (verificar Supabase, não só `ok: true`)
-
-### Segurança
-
-- [ ] Rate limiting nas rotas públicas
-- [ ] Helmet (headers de segurança)
-- [ ] Validação de input com Zod (ou similar)
-- [ ] Revisar todas as queries com `service_role` para garantir filtro por
-      `user_id`
-
-### Testes
-
+- [ ] Log estruturado (`pino`)
+- [ ] Sentry
+- [ ] Health check robusto
+- [ ] Rate limiting
+- [ ] Helmet
+- [ ] Validação com Zod
 - [ ] Testes unitários (Vitest)
-- [ ] Testes de integração das rotas autenticadas
-- [ ] Mock do Supabase nos testes
-
-### Deploy
-
-- [ ] CI/CD (GitHub Actions) — build automático no push
-- [ ] Avaliar quando migrar para Node 22 (permite remover o pacote `ws`)
-- [ ] Avaliar host dedicado se as funções serverless da Vercel ficarem
-      limitantes (timeout, cold start, tamanho de payload)
+- [ ] CI/CD (GitHub Actions)
+- [ ] Node 22 (permite remover `ws`)
+- [ ] Rotacionar `service_role` (se necessário)
+- [ ] Avaliar host dedicado se Vercel ficar limitante
 
 ---
 
 ## Decisões pendentes
 
-- [ ] Provedor de WhatsApp (Cloud API vs. intermediário) — afeta Fase 6
-- [ ] Provedor de e-mail (Resend / SES / Postmark) — afeta Fase 6
-- [ ] Provedor de transcrição de áudio — afeta Fase 4
-- [ ] Biblioteca de geração de PDF — afeta Fase 5
-- [ ] Layout do recibo — afeta Fase 5
-- [ ] Quando versionar migrations SQL (hoje são rodadas manualmente no SQL
-      Editor)
-- [ ] Quando subir para Node 22 (permite remover o pacote `ws`)
+- [ ] Provedor de WhatsApp
+- [ ] Provedor de e-mail
+- [ ] Provedor de transcrição
+- [ ] Biblioteca de PDF
+- [ ] Layout do recibo
+- [ ] Quando versionar migrations
+- [ ] Quando subir para Node 22
+- [ ] Estratégia de sincronização com Google (webhook vs. polling)
 
 ---
 
 ## Concluído (registro histórico)
 
-- **Fase 1 completa:** Express + TS + ESM, `env.ts` validando, `supabaseAdmin`
-  com `ws`, `requireAuth`, `errorHandler`, CORS configurável
-- **Fase 2 completa:** `POST /invites` com `schedules` obrigatórios, validação,
-  TinyURL API oficial, `wa.me`, tabela `patient_invite_schedules` com RLS +
-  GRANTs
-- **Deploy em produção:** Vercel, `vercel.json` com `@vercel/node`,
-  `server.ts` adaptado para serverless
-- **Segurança:** `service_role` rotacionada após vazar em chat
+- **Fase 1 completa:** Express + TS + ESM, `env.ts`, `supabaseAdmin` com `ws`,
+  `requireAuth`, `errorHandler`, CORS
+- **Fase 2 completa:** `POST /invites` com `schedules`, TinyURL oficial, `wa.me`
+- **Deploy em produção:** Vercel serverless
+- **Fase 3 parcial:** integração Google Calendar (OAuth, leitura, importação
+  idempotente); tabelas `appointments` + `google_credentials`; status `prospect`
+- **Segurança:** `service_role` rotacionada
