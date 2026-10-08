@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { invitesRoutes } from "./modules/invites/invites.routes.js";
+import { calendarRoutes } from "./modules/calendar/calendar.routes.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
 import { env } from "./config/env.js";
 
@@ -17,6 +18,7 @@ export function createApp() {
 
   app.get("/health", (_req, res) => res.json({ ok: true }));
   app.use("/invites", invitesRoutes);
+  app.use("/calendar", calendarRoutes);
 
   app.use(errorHandler);
   return app;
