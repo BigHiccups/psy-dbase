@@ -11,9 +11,14 @@ export const env = {
   supabaseUrl: required("SUPABASE_URL"),
   supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
   frontendUrl: required("FRONTEND_URL"),
-  tinyurlApiToken: required("TINYURL_API_TOKEN"), // ← Adicionar
+  tinyurlApiToken: required("TINYURL_API_TOKEN"),
   corsOrigins: (process.env.CORS_ORIGINS ?? process.env.FRONTEND_URL ?? "")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean),
+
+  // Google Calendar OAuth
+  googleClientId: required("GOOGLE_CLIENT_ID"),
+  googleClientSecret: required("GOOGLE_CLIENT_SECRET"),
+  googleRedirectUri: required("GOOGLE_REDIRECT_URI"),
 };
