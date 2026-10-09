@@ -11,8 +11,7 @@
 ## 🎯 Próximos 3 passos
 
 1. **Escrever no Google Calendar** — ao criar `appointments` no psy-dbase,
-   criar evento no Google (`events.insert`); ao cancelar, remover. Fecha o
-   ciclo bidirecional.
+   criar evento no Google (`events.insert`); ao cancelar, remover.
 2. **Link do Meet automático** — gerar `conferenceData` ao criar evento no
    Google, salvar `hangoutLink` no `appointments`.
 3. **Cron job para estender horizonte** — renovar `appointments` recorrentes
@@ -45,16 +44,16 @@
 
 ---
 
-## Fase 3 — Agenda + Google Calendar
+## Fase 3 — Google Calendar
 
-### ✅ Concluído — Integração Google (leitura + importação)
+### ✅ Concluído — Leitura + Importação + Revisão
 
-- [x] Tabela `appointments`
-- [x] Tabela `google_credentials`
+- [x] Tabelas `appointments`, `google_credentials`, `providers`,
+      `google_imported_recurrences`
 - [x] `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`
 - [x] OAuth Client no Google Cloud
 - [x] Escopo `.../auth/calendar` no consent screen
-- [x] Conta profissional como Test User
+- [x] Contas (teste + oficial) como Test User
 - [x] Módulo `calendar`
 - [x] `GET /calendar/connect`
 - [x] `GET /calendar/callback`
@@ -62,8 +61,15 @@
 - [x] `GET /calendar/events`
 - [x] `POST /calendar/import`
 - [x] `DELETE /calendar/disconnect`
-- [x] Importação idempotente
+- [x] Importação idempotente (2 camadas)
 - [x] Status `prospect` em `patients`
+- [x] `type` em `appointments` com 4 valores (`session`, `personal`,
+      `blocked`, `due`)
+- [x] Constraint `appointments_subject_check`
+- [x] RPCs: `convert_prospect_to_provider`, `promote_prospect_to_active`,
+      `discard_prospect`
+- [x] `service_role` rotacionada
+- [x] Logs de debug do `auth.ts` removidos
 
 ### ⏳ Pendente — Escrita no Google
 
@@ -85,9 +91,18 @@
 
 - [ ] Aprovação de submissão cria `appointments` recorrentes (12 semanas)
 - [ ] Arquivar paciente cancela `appointments` futuros
-- [ ] Reativar paciente recria `appointments` a partir de `patient_invite_schedules`
+- [ ] Reativar paciente recria `appointments` a partir de
+      `patient_invite_schedules`
 - [ ] Botão "Encerrar tratamento" (cancela futuros, mantém histórico)
-- [ ] Cron job semanal para estender horizonte (renovar 12 semanas)
+- [ ] Cron job semanal para estender horizonte (renovar 90 dias)
+
+### ⏳ Pendente — Vencimentos (`due`)
+
+- [ ] Endpoint `POST /providers/:id/due` — cria N `appointments` tipo `due`
+      (parcelas mensais, anuais)
+- [ ] Endpoint `POST /providers/:id/due/:id/mark-paid` — marca vencimento como
+      pago (cria `expense` na Fase 5)
+- [ ] UI de vencimentos (frontend)
 
 ---
 
@@ -141,8 +156,9 @@
 - [ ] Testes unitários (Vitest)
 - [ ] CI/CD (GitHub Actions)
 - [ ] Node 22 (permite remover `ws`)
-- [ ] Rotacionar `service_role` (se necessário)
 - [ ] Avaliar host dedicado se Vercel ficar limitante
+- [ ] Auditoria periódica de cruzamento: `appointments.user_id != patients.user_id`
+- [ ] Migração para versionar migrations no repositório
 
 ---
 
@@ -156,15 +172,15 @@
 - [ ] Quando versionar migrations
 - [ ] Quando subir para Node 22
 - [ ] Estratégia de sincronização com Google (webhook vs. polling)
+- [ ] Se o import continua sendo manual ou se roda automaticamente
 
 ---
 
 ## Concluído (registro histórico)
 
-- **Fase 1 completa:** Express + TS + ESM, `env.ts`, `supabaseAdmin` com `ws`,
-  `requireAuth`, `errorHandler`, CORS
-- **Fase 2 completa:** `POST /invites` com `schedules`, TinyURL oficial, `wa.me`
+- **Fase 1 completa:** Express + TS + ESM
+- **Fase 2 completa:** `POST /invites` com `schedules`, TinyURL oficial
 - **Deploy em produção:** Vercel serverless
-- **Fase 3 parcial:** integração Google Calendar (OAuth, leitura, importação
-  idempotente); tabelas `appointments` + `google_credentials`; status `prospect`
+- **Fase 3 (leitura + importação + revisão) completa:** OAuth Google Calendar,
+  importação idempotente, tabela `providers`, RPCs de revisão
 - **Segurança:** `service_role` rotacionada
