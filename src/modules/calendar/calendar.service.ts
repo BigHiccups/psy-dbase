@@ -47,7 +47,6 @@ export async function handleCallback(code: string, userId: string) {
     clientForInfo.setCredentials(tokens);
     const oauth2 = google.oauth2({ version: "v2", auth: clientForInfo });
     const userInfo = await oauth2.userinfo.get();
-    console.log("[calendar] conta autorizada:", userInfo.data.email);
   } catch (err) {
     console.warn("[calendar] falha ao consultar e-mail autorizado:", err);
   }
@@ -161,8 +160,11 @@ type ImportResult = {
 // Cria a agenda recorrente no psy-dbase a partir dos eventos do Google
 // - Cria um patient provisório (status='prospect') para cada recorrência
 // - Cria N appointments (um por ocorrência no período)
-// - Idempotente: pula ocorrências cujo google_event_id já existe,
-//   e reutiliza o paciente provisório se já existir um com o mesmo nome
+// - Idempotência em duas camadas:
+//   1) Por recorrência (google_imported_recurrences) — evita recriar
+//      pacientes/providers que já foram processados, mesmo que tenham sido
+//      convertidos para outro tipo depois
+//   2) Por ocorrência (appointments.google_event_id) — evita duplicar slots
 export async function importCalendarEvents(
   userId: string,
   daysAhead = 90
@@ -187,7 +189,7 @@ export async function importCalendarEvents(
   }
 
   const result: ImportResult = {
-    importedEvents: events.length,   // ← agora conta corretamente
+    importedEvents: events.length,
     importedAppointments: 0,
     importedPatients: 0,
     skipped: 0,
@@ -211,26 +213,81 @@ export async function importCalendarEvents(
     );
 
     const rawName = first.summary ?? "Sem nome";
+    const recurringId = first.recurringEventId ?? first.id ?? null;
 
-    // Idempotência do paciente: reutiliza se já existe um prospect com esse nome
-    const { data: existingPatient } = await supabaseAdmin
-      .from("patients")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("full_name", rawName)
-      .eq("status", "prospect")
-      .maybeSingle();
+    // =====================================================
+    // Idempotência por recorrência
+    // =====================================================
+    let patientId: string | null = null;
+    let alreadyImportedAsProvider = false;
 
-    let patientId: string;
-    if (existingPatient) {
-      patientId = existingPatient.id;
-    } else {
+    if (recurringId) {
+      const { data: existingImports, error: importLookupError } =
+        await supabaseAdmin
+          .from("google_imported_recurrences")
+          .select("user_id, target_type, target_id")
+          .eq("user_id", userId)
+          .eq("google_recurring_event_id", recurringId);
+
+      // Se houver duplicata, prioriza provider (estado "final" esperado)
+      const existingImport =
+        existingImports?.find((x) => x.target_type === "provider") ??
+        existingImports?.[0];
+
+      if (existingImport) {
+        if (existingImport.target_type === "patient") {
+          patientId = existingImport.target_id;
+        } else {
+          alreadyImportedAsProvider = true;
+        }
+      }
+    }
+
+    // Se é provider, pula (não cria appointment do tipo session)
+    if (alreadyImportedAsProvider) {
+      result.skipped += group.length;
+      continue;
+    }
+
+    // =====================================================
+    // Fallback: procura em patients por nome
+    // =====================================================
+    if (!patientId) {
+      const { data: existingByName } = await supabaseAdmin
+        .from("patients")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("full_name", rawName)
+        .maybeSingle();
+
+      if (existingByName) {
+        patientId = existingByName.id;
+
+        // Backfill: registra a recorrência para os próximos imports
+        if (recurringId) {
+          await supabaseAdmin
+            .from("google_imported_recurrences")
+            .insert({
+              user_id: userId,
+              google_recurring_event_id: recurringId,
+              target_type: "patient",
+              target_id: existingByName.id,
+            });
+        }
+      }
+    }
+
+    // =====================================================
+    // Se ainda não achou, cria um provisório novo
+    // =====================================================
+    if (!patientId) {
       const { data: patient, error: patientError } = await supabaseAdmin
         .from("patients")
         .insert({
           user_id: userId,
           full_name: rawName,
           status: "prospect",
+          google_recurring_event_id: recurringId,
         })
         .select()
         .single();
@@ -245,10 +302,24 @@ export async function importCalendarEvents(
 
       patientId = patient.id;
       result.importedPatients++;
-      result.patients.push({ id: patientId, full_name: rawName });
+      result.patients.push({ id: patient.id, full_name: rawName });
+
+      // Registra a recorrência
+      if (recurringId) {
+        await supabaseAdmin
+          .from("google_imported_recurrences")
+          .insert({
+            user_id: userId,
+            google_recurring_event_id: recurringId,
+            target_type: "patient",
+            target_id: patient.id,
+          });
+      }
     }
 
+    // =====================================================
     // Cria os appointments (um por ocorrência)
+    // =====================================================
     const rows = group
       .filter((ev) => ev.id && ev.start?.dateTime && ev.end?.dateTime)
       .map((ev) => {
@@ -272,7 +343,7 @@ export async function importCalendarEvents(
         };
       });
 
-    // Idempotência dos appointments
+    // Idempotência dos appointments por google_event_id
     const existingIds = rows.map((r) => r.google_event_id);
     const { data: existing } = await supabaseAdmin
       .from("appointments")
