@@ -14,14 +14,12 @@ Responsável por tudo que exige **segredos** ou **integrações externas**:
 
 - Validação de JWT do Supabase
 - Geração de convites com horários + TinyURL + WhatsApp
-- **Integração com Google Calendar (OAuth + leitura + importação)**
+- **Integração Google Calendar** (OAuth + leitura + importação idempotente)
 - Envio de WhatsApp / e-mail (Fase 6)
 - Geração de PDF de recibo (Fase 5)
 - Transcrição de áudio (Fase 4, provedor a decidir)
 
 **Repositório irmão:** `psy-dbase-front` (React + Tailwind + Vite).
-**Um psicólogo por conta.** Não é multi-tenant compartilhado.
-
 **Status:** em produção na Vercel — `https://psy-dbase.vercel.app`
 
 ---
@@ -141,18 +139,15 @@ export const supabaseAdmin = createClient(url, key, {
 
 ### 4.5 Validação de JWT via `supabaseAdmin.auth.getUser(token)`
 
-O `requireAuth` valida o token com a `service_role`. Isso é seguro — o Supabase
-verifica assinatura e expiração. Retorna `req.userId` (o `sub` do JWT).
+O `requireAuth` valida o token com a `service_role`. Retorna `req.userId`.
 
 ### 4.6 TinyURL — API oficial com fallback
 
 O encurtador usa a **API oficial** (`https://api.tinyurl.com/create`), com
-autenticação Bearer (`TINYURL_API_TOKEN`). Elimina o interstitial do endpoint
-legado.
+autenticação Bearer (`TINYURL_API_TOKEN`). O `shortenUrl` **nunca quebra o
+fluxo** — se falhar, devolve a URL original.
 
-O `shortenUrl` **nunca quebra o fluxo**. Se falhar, devolve a URL original.
-
-### 4.7 WhatsApp via `wa.me` (sem API oficial ainda)
+### 4.7 WhatsApp via `wa.me`
 
 Link montado como `https://wa.me/<phone>?text=<mensagem-urlencoded>`. A
 normalização em `src/utils/phone.ts` assume **Brasil**.
@@ -165,7 +160,7 @@ do OAuth Google).
 
 ### 4.9 Deploy na Vercel — serverless com Express adaptado
 
-A Vercel não roda Express puro. O `src/server.ts` faz:
+`src/server.ts`:
 
 ```ts
 const app = createApp();
@@ -182,25 +177,17 @@ E o `vercel.json`:
 ```json
 {
   "version": 2,
-  "builds": [
-    { "src": "src/server.ts", "use": "@vercel/node" }
-  ],
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/src/server.ts" }
-  ]
+  "builds": [{ "src": "src/server.ts", "use": "@vercel/node" }],
+  "rewrites": [{ "source": "/(.*)", "destination": "/src/server.ts" }]
 }
 ```
-
-**Sem o `vercel.json`**, a Vercel retorna 500 em tudo. **Sem a condicional**, o
-`app.listen` conflita com o gerenciamento de porta.
 
 ### 4.10 Google Calendar — arquitetura da integração
 
 **Decisão estratégica:** o Google Calendar é **ponto de partida**, não fonte
 contínua de verdade.
 
-- **Leitura contínua:** o psy-dbase lê o Google para descobrir slots ocupados
-  (bloqueio rígido de horário)
+- **Leitura contínua:** para descobrir slots ocupados (bloqueio rígido)
 - **Escrita unidirecional (psy-dbase → Google):** prevista para depois
 - **Importação inicial:** os eventos recorrentes existentes são **materializados**
   em `appointments` (um slot por ocorrência)
@@ -208,51 +195,76 @@ contínua de verdade.
 **Por que materializar?** Permite cancelar uma sessão específica sem afetar as
 outras, e o bloqueio de horário funciona por slot individual.
 
-**Refresh token:** guardado em `google_credentials`, protegido por RLS +
-`service_role`. Sem policies para `authenticated` — o frontend **nunca** acessa.
-
 **Conta do Google:** o psicólogo pode autorizar uma conta **diferente** da que
-faz login no psy-dbase. O `prompt` do OAuth inclui `select_account` para
-forçar a escolha.
+faz login no psy-dbase. O `prompt` do OAuth inclui `select_account`.
 
-### 4.11 Status `prospect` em patients
+### 4.11 Status `prospect` e a tabela `providers`
 
-`patients.status` aceita 4 valores: `prospect`, `active`, `inactive`,
-`discharged`.
+**`patients.status`:** `prospect` | `active` | `inactive` | `discharged`
 
 - **`prospect`** — paciente importado do Google, aguardando revisão
 - **`active`** — paciente em tratamento
 - **`inactive`** — arquivado (soft delete)
 - **`discharged`** — alta
 
-Quando o import cria pacientes, eles entram como `prospect`. A UI de revisão
-(no frontend) permite promover para `active` ou converter o agendamento para
-`personal`/`blocked`.
+**Tabela `providers`** separa **pacientes** de **prestadores/instituições**:
 
-### 4.12 `appointments` — modelo de agenda interna
+- `kind = 'person'` → psicólogo pessoal, supervisor, etc.
+- `kind = 'company'` → curso, plataforma, editora, aluguel, etc.
 
-Cada linha = um slot. `is_recurring=true` significa que é uma ocorrência de
-uma recorrência semanal (`starts_on`/`ends_on` definem o intervalo).
-`is_recurring=false` significa sessão avulsa.
+**Por que separar?** `patients` tem campos clínicos (contato de urgência);
+`providers` tem campos jurídicos (razão social, CNPJ). O financeiro (Fase 5)
+trata entradas × pacientes e saídas × providers.
 
-**Constraint crítica:**
+### 4.12 `appointments` — modelo de agenda
+
+Cada linha = um slot. `type` define o sujeito:
+
+| `type` | `patient_id` | `provider_id` | Ocupa agenda? |
+|---|---|---|---|
+| `session` | obrigatório | null | sim |
+| `personal` | null | obrigatório | sim |
+| `blocked` | null | null | sim |
+| `due` | null | obrigatório | **não** (marcador de vencimento) |
+
+Constraint:
 
 ```sql
-check (type != 'session' or patient_id is not null)
+check (
+  (type = 'session' and patient_id is not null and provider_id is null)
+  or (type = 'personal' and patient_id is null and provider_id is not null)
+  or (type = 'blocked' and patient_id is null and provider_id is null)
+  or (type = 'due' and patient_id is null and provider_id is not null)
+)
 ```
 
-Ou seja: `session` **exige** paciente. `personal` e `blocked` podem ter
-`patient_id = null`.
+### 4.13 Idempotência da importação (2 camadas)
 
-### 4.13 Importação idempotente
+`importCalendarEvents` pode rodar várias vezes sem duplicar:
 
-`importCalendarEvents` pode rodar várias vezes:
+**Camada 1 — `google_imported_recurrences`:** tabela de rastreio que mapeia
+`recurringEventId` → `(target_type, target_id)`. Se já existe, pula.
 
-- **Appointments:** pula se já existe `appointments.google_event_id` igual
-- **Patients:** reutiliza `prospect` existente com o mesmo `full_name` +
-  `user_id`, em vez de criar duplicado
+**Camada 2 — `appointments.google_event_id`:** cada ocorrência tem ID único.
+Se já existe `appointments` com aquele `google_event_id`, pula.
 
-Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
+**Por que duas camadas?** A camada 1 evita criar pacientes/providers
+duplicados mesmo se o paciente foi renomeado ou convertido em provider. A
+camada 2 evita criar slots duplicados.
+
+### 4.14 RPCs de revisão de provisórios
+
+Três RPCs (SQL `security definer`) executadas pelo frontend:
+
+- `convert_prospect_to_provider(p_patient_id, p_kind)` — cria provider,
+  converte `appointments` para `personal`, atualiza
+  `google_imported_recurrences`, deleta o patient
+- `promote_prospect_to_active(p_patient_id)` — muda status para `active`
+- `discard_prospect(p_patient_id)` — deleta patient + appointments +
+  recorrência
+
+**Por que RPC em vez de update direto?** Atomicidade — todas as operações
+acontecem ou nenhuma acontece. Sem risco de estado inconsistente.
 
 ---
 
@@ -262,7 +274,7 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
 
 **Autenticado.** Cria convite, encurta URL, monta link do WhatsApp.
 
-1. `requireAuth` valida o JWT e injeta `req.userId`
+1. `requireAuth` valida o JWT
 2. `validateSchedules` valida os horários (obrigatórios, dia 0–6, `HH:MM`,
    duração 15–240)
 3. Insere em `patient_invites` + `patient_invite_schedules`
@@ -274,7 +286,7 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
 1. Frontend chama `GET /calendar/connect` (autenticado)
 2. Backend gera URL com `access_type=offline`, `prompt="consent select_account"`,
    `state=userId`
-3. Frontend abre em nova aba
+3. Frontend abre em **nova aba**
 4. Usuário autoriza, Google chama `GET /calendar/callback?code=...&state=...`
 5. Backend troca `code` por `refresh_token`, salva em `google_credentials`
 6. Backend redireciona para `<FRONTEND_URL>/settings?google=connected`
@@ -285,10 +297,21 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
 2. Backend lista eventos (`events.list` com `singleEvents: true`)
 3. Agrupa por `recurringEventId`
 4. Para cada grupo:
-   - Cria (ou reutiliza) um `patients` com `status='prospect'`
-   - Cria N `appointments` (um por ocorrência), com `google_event_id`
-5. Retorna resumo (`importedEvents`, `importedAppointments`, `importedPatients`,
-   `skipped`)
+   - Checa `google_imported_recurrences`
+   - Se não existe, cria `patient` provisório ou reutiliza por nome
+   - Cria N `appointments` (um por ocorrência)
+   - Registra em `google_imported_recurrences`
+5. Retorna resumo
+
+**Idempotente:** rodar várias vezes nunca duplica.
+
+### 5.4 Conversão de provisório
+
+Três caminhos possíveis pelo frontend, via RPC:
+
+- **É paciente** → `promote_prospect_to_active` (após preencher dados)
+- **É prestador** → `convert_prospect_to_provider`
+- **Remover** → `discard_prospect`
 
 ---
 
@@ -298,7 +321,7 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
   em **português**.
 - **ESM:** imports **precisam** terminar em `.js` (mesmo em arquivos `.ts`).
 - **Erros:** lançar `Error` no service, capturar no `errorHandler` central.
-- **Nada de `any`:** exceto em integrações de bibliotecas com tipos divergentes.
+- **Nada de `any`:** exceto em integrações com bibliotecas.
 - **Nomes de rota:** plural e minúsculo (`/invites`, `/calendar`).
 
 ---
@@ -313,14 +336,14 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
 | `Variável de ambiente ausente: X`                             | `.env` faltando ou rodado de outra pasta                    | Rodar de dentro do repo                                       |
 | `permission denied for table` mesmo com `service_role`        | GRANT não existe                                            | `grant … to service_role`                                     |
 | `Token inválido` no curl                                      | Colou `service_role` em vez do `access_token`               | Usar token do usuário (`"role":"authenticated"`)              |
-| `ERROR: Unexpected "==="` no `tsx`                            | Comentário `// ====` perdeu o `//`                          | Todo comentário começa com `//`                               |
 | `ERR_MODULE_NOT_FOUND`                                        | Import sem `.js`                                            | Adicionar `.js` (ESM)                                         |
 | Link do TinyURL cai em página genérica                        | Endpoint legado `api-create.php`                            | Migrar para API oficial                                       |
 | URL malformada no convite                                     | Lista de CORS em `FRONTEND_URL`                             | Separar as duas variáveis                                     |
-| `Access blocked: app not verified`                            | Conta não está como Test User                               | Adicionar em **Público-alvo** no Google Cloud                 |
-| `redirect_uri_mismatch`                                       | Redirect URI do Google Cloud ≠ do `.env`                    | Confirmar `http://localhost:3333/calendar/callback`           |
+| `Access blocked: app not verified`                            | Conta não está como Test User no Google Cloud               | Adicionar em **Público-alvo** no Google Cloud                 |
+| `redirect_uri_mismatch`                                       | Redirect URI do Google Cloud ≠ do `.env`                    | Confirmar `https://psy-dbase.vercel.app/calendar/callback`    |
 | `O Google não retornou refresh_token`                         | Usuário já autorizou antes                                  | Revogar em myaccount.google.com/permissions                   |
-| `Request is missing required authentication credential`       | Chamada à API do Google sem token                           | Rodar `/calendar/connect` primeiro                            |
+| **Importação cria paciente duplicado**                        | Faltava checar `google_imported_recurrences`                | Usar a tabela de rastreio (seção 4.13)                        |
+| **`maybeSingle()` retorna null mesmo com linha existente**    | Duplicata na tabela (índice único não ativo)                | Garantir índice único + `select()` em vez de `maybeSingle()`  |
 
 ---
 
@@ -329,18 +352,17 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
 - **`service_role`:** só existe no backend + painel da Vercel. Se vazar,
   **rotacionar imediatamente**.
 - **`google_credentials.refresh_token`:** plain na tabela, sem policies para
-  `authenticated`. Só o backend acessa.
+  `authenticated`. Só o backend acessa via `service_role`.
 - **`GOOGLE_CLIENT_SECRET`:** Secret no painel da Vercel.
 - **`GOOGLE_CLIENT_ID`** e **`GOOGLE_REDIRECT_URI`:** Config (públicos).
 - **CORS:** lista explícita, sem `*`.
-- **Env vars de produção:** no painel da Vercel, não em arquivo versionado.
 
 ---
 
 ## 9. O que está fora do escopo
 
 - Renderização de UI → **frontend `psy-dbase-front`**
-- Migrations SQL → **rodadas manualmente no SQL Editor do Supabase**
+- Migrations SQL → **SQL Editor do Supabase**
 - Autenticação OAuth (login) → **Supabase Auth**
 
 ---
@@ -353,30 +375,28 @@ Roda com `POST /calendar/import` e `{ "daysAhead": 90 }`.
 - ✅ `requireAuth` validando JWT
 - ✅ `GET /health`
 - ✅ `POST /invites` com `schedules` obrigatórios
-- ✅ TinyURL API oficial com fallback
+- ✅ TinyURL oficial com fallback
 - ✅ Deploy em produção na Vercel
-- ✅ `vercel.json` + `server.ts` adaptado
-- ✅ `service_role` rotacionada
-- ✅ **Módulo `calendar` completo:**
-  - `GET /calendar/connect` — gera URL de autorização
-  - `GET /calendar/callback` — recebe code, salva tokens
-  - `GET /calendar/status` — status da conexão
-  - `GET /calendar/events` — lista eventos do Google
-  - `POST /calendar/import` — importa recorrências para `appointments`
-  - `DELETE /calendar/disconnect` — remove credenciais
-- ✅ Tabelas `appointments` e `google_credentials`
+- ✅ Módulo `calendar` completo (connect / callback / status / events /
+  import / disconnect)
+- ✅ Tabelas: `appointments`, `google_credentials`, `providers`,
+  `google_imported_recurrences`
 - ✅ Status `prospect` em `patients`
+- ✅ RPCs: `convert_prospect_to_provider`, `promote_prospect_to_active`,
+  `discard_prospect`
+- ✅ Idempotência em 2 camadas na importação
+- ✅ `service_role` rotacionada
+- ✅ Logs de debug limpos no `auth.ts`
 
 **Pendente (Fase 3+):**
 
 - ⏳ Escrever eventos no Google (psy-dbase → Calendar)
-- ⏳ Sincronização bidirecional
 - ⏳ Link do Meet automático ao criar `appointments`
-- ⏳ Cron job para estender horizonte de agendamentos
-- ⏳ UI de revisão de provisórios (frontend)
+- ⏳ Cron job para estender horizonte (90 dias → renovar)
 - ⏳ Página `/agenda` (frontend)
 - ⏳ Bloqueio rígido no `InvitePatientModal` (frontend)
-- ⏳ Notificações (WhatsApp API + e-mail)
+- ⏳ CRUD de `due` (vencimentos de provider)
+- ⏳ Notificações (WhatsApp + e-mail)
 - ⏳ Recibos em PDF
 - ⏳ Transcrição de áudio
 - ⏳ Log estruturado / Sentry
