@@ -10,13 +10,13 @@
 
 ## 🎯 Próximos 3 passos
 
-1. **Escrever no Google Calendar** — ao criar `appointments` no psy-dbase,
-   criar evento no Google (`events.insert`); ao cancelar, remover.
-2. **Link do Meet automático** — gerar `conferenceData` ao criar evento no
-   Google, salvar `hangoutLink` no `appointments`.
-3. **Cron job para estender horizonte** — renovar `appointments` recorrentes
-   quando estiverem a menos de 30 dias do fim.
-
+1. **Fase 5 (Financeiro)** — consumir `session_price_cents` para calcular
+   receitas (pacientes) e despesas (providers)
+2. **`provider_billings`** — backend pode precisar de endpoints para CRUD
+   de vencimentos de empresas (se o frontend não fizer tudo via RLS)
+3. **Escrever no Google Calendar** — Fase 6 completa:
+   `events.insert` / `events.patch` / `events.delete` + link do Meet
+   automático + envio em cadeia para a agenda do paciente
 ---
 
 ## Fase 1 — Fundação ✅
@@ -104,6 +104,34 @@
       pago (cria `expense` na Fase 5)
 - [ ] UI de vencimentos (frontend)
 
+
+### `session_price_cents` (concluído no frontend)
+
+- [x] Coluna `patients.session_price_cents` (SQL direto no Supabase)
+- [x] Coluna `providers.session_price_cents` (SQL direto no Supabase)
+- [x] Frontend lê, exibe e edita (não envolve o backend Node)
+- [ ] Backend consome `session_price_cents` no financeiro (Fase 5)
+- [ ] Backend consome `session_price_cents` no recibo (Fase 5)
+
+### `provider_billings` (a implementar)
+
+**Contexto:** prestadores `kind='company'` (curso, plataforma, aluguel) não
+têm sessão semanal — têm **vencimento** mensal, bimestral, semestral ou anual.
+
+- [ ] Tabela `provider_billings`:
+  - `provider_id`, `description`
+  - `amount` (em centavos, mesma unidade de `session_price_cents`)
+  - `due_day` (1–31)
+  - `frequency` (`monthly` | `bimonthly` | `semiannual` | `yearly` | `once`)
+  - `installments_total`, `installments_paid`
+  - `starts_on`, `ends_on`, `status`
+- [ ] RPC `set_provider_billings`
+- [ ] RPC `mark_billing_as_paid`
+- [ ] RPC `cancel_provider_billings` (4 modos: imediato, a partir de data,
+      suspender, **renovar**)
+- [ ] Endpoint backend `POST /providers/:id/billings` (se necessário)
+- [ ] Geração de `expenses` correspondentes (Fase 5)
+
 ---
 
 ## Fase 4 — Transcrição de Áudio
@@ -118,6 +146,8 @@
 
 ## Fase 5 — Recibos em PDF
 
+- [ ] Usar `patients.session_price_cents` como valor base do recibo
+- [ ] Usar `appointments` (data, tipo) para compor os itens do recibo
 - [ ] Biblioteca de PDF
 - [ ] `POST /receipts`
 - [ ] Layout do recibo

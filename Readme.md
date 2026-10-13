@@ -240,3 +240,15 @@ A definir (Render / Railway / Fly.io). Após o deploy:
 ## Licença
 
 A definir.
+
+## Notas sobre campos do banco usados pelo frontend
+
+Alguns campos são usados **apenas pelo frontend** (leitura e escrita direta
+via Supabase, protegidos por RLS). O backend Node não os manipula:
+
+- `patients.session_price_cents`
+- `providers.session_price_cents`
+- `patient_schedules.recurrence_*` (a implementar)
+- `provider_billings.*` (a implementar)
+
+Para o modelo completo, ver `CONTEXT.md` (seções 4.15 e 4.16).
