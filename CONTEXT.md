@@ -266,6 +266,55 @@ Três RPCs (SQL `security definer`) executadas pelo frontend:
 **Por que RPC em vez de update direto?** Atomicidade — todas as operações
 acontecem ou nenhuma acontece. Sem risco de estado inconsistente.
 
+### 4.15 `session_price_cents` em `patients` e `providers`
+
+Valor da sessão/serviço armazenado em **centavos** (`int`) para evitar float.
+
+- **`patients.session_price_cents`** — valor que o psicólogo cobra do paciente
+- **`providers.session_price_cents`** — valor que o psicólogo paga:
+  - `kind='person'` → valor pago por sessão
+  - `kind='company'` → valor recorrente de referência (Fase B refina com `provider_billings`)
+
+**Quem escreve:** o frontend (direto no Supabase, via RLS).
+**Quem lê:** o frontend. **O backend Node não toca nesse campo.**
+
+**Impacto futuro:**
+- **Fase 5 (Financeiro)** vai usar esse valor para calcular receitas
+  (pacientes) e despesas (providers).
+- **Fase 5 (Recibos)** vai usar esse valor no PDF do recibo.
+- **Fase 3 estendida (`provider_billings`)** vai usar `amount` em centavos,
+  mesma unidade.
+
+### 4.16 Validação de sobreposição de intervalo nas RPCs de schedule
+
+As RPCs **`set_patient_schedules`** e **`set_provider_schedules`** validam
+conflito de horário por **SOBREPOSIÇÃO DE INTERVALO**, não por igualdade de
+`start_time`.
+
+Regra matemática:
+
+```
+a.start < b.end  AND  b.start < a.end
+```
+
+Exemplos:
+- `14:30–15:30` vs `15:00` → **bloqueia** (sobreposição)
+- `14:00–14:30` vs `14:30` → **não bloqueia** (fim coincide com início)
+- `15:00–16:00` vs `14:30–15:30` → **bloqueia**
+
+**Implementação:** o cálculo é feito **dentro da RPC** (PL/pgSQL, com
+`extract(hour from start_time) * 60 + extract(minute from start_time)`).
+O backend Node **não participa** dessa validação.
+
+**As RPCs relacionadas que seguem a mesma lógica:**
+- `cancel_patient_appointment_series`
+- `cancel_provider_appointment_series`
+- `reactivate_appointment`
+
+**Histórico:** antes, a validação era por igualdade exata de `weekday +
+start_time`, o que permitia conflitos parciais (ex: `14:30–15:30` e `15:00`).
+Corrigido nesta última rodada.
+
 ---
 
 ## 5. Fluxos implementados
