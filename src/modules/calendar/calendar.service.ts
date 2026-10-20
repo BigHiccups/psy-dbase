@@ -40,17 +40,6 @@ export async function handleCallback(code: string, userId: string) {
     );
   }
 
-  // Log temporário: confirma qual conta autorizou
-  // (remover depois que validar)
-  try {
-    const clientForInfo = createOAuthClient();
-    clientForInfo.setCredentials(tokens);
-    const oauth2 = google.oauth2({ version: "v2", auth: clientForInfo });
-    const userInfo = await oauth2.userinfo.get();
-  } catch (err) {
-    console.warn("[calendar] falha ao consultar e-mail autorizado:", err);
-  }
-
   const { error } = await supabaseAdmin
     .from("google_credentials")
     .upsert({
@@ -123,8 +112,6 @@ export async function disconnect(userId: string) {
 // Google Calendar API
 // =========================================================
 
-// Lista eventos de um período
-// Retorna eventos expandidos (recorrência materializada)
 export async function listEvents(
   userId: string,
   timeMin: string,
@@ -157,14 +144,6 @@ type ImportResult = {
   patients: { id: string; full_name: string }[];
 };
 
-// Cria a agenda recorrente no psy-dbase a partir dos eventos do Google
-// - Cria um patient provisório (status='prospect') para cada recorrência
-// - Cria N appointments (um por ocorrência no período)
-// - Idempotência em duas camadas:
-//   1) Por recorrência (google_imported_recurrences) — evita recriar
-//      pacientes/providers que já foram processados, mesmo que tenham sido
-//      convertidos para outro tipo depois
-//   2) Por ocorrência (appointments.google_event_id) — evita duplicar slots
 export async function importCalendarEvents(
   userId: string,
   daysAhead = 90
@@ -204,10 +183,25 @@ export async function importCalendarEvents(
     const start = new Date(first.start.dateTime);
     const endDt = new Date(first.end.dateTime);
 
-    const weekday = start.getDay();
-    const startTime = `${String(start.getHours()).padStart(2, "0")}:${String(
-      start.getMinutes()
-    ).padStart(2, "0")}`;
+    // FORÇA O FUSO HORÁRIO DO BRASIL
+    const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
+      timeZone: "America/Sao_Paulo",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const startTime = timeFormatter.format(start);
+
+    const dateFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      weekday: "short",
+    });
+    const weekdayStr = dateFormatter.format(start);
+    const weekdayMap: Record<string, number> = {
+      "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6
+    };
+    const weekday = weekdayMap[weekdayStr];
+
     const durationMin = Math.round(
       (endDt.getTime() - start.getTime()) / 60000
     );
@@ -215,21 +209,16 @@ export async function importCalendarEvents(
     const rawName = first.summary ?? "Sem nome";
     const recurringId = first.recurringEventId ?? first.id ?? null;
 
-    // =====================================================
-    // Idempotência por recorrência
-    // =====================================================
     let patientId: string | null = null;
     let alreadyImportedAsProvider = false;
 
     if (recurringId) {
-      const { data: existingImports, error: importLookupError } =
-        await supabaseAdmin
-          .from("google_imported_recurrences")
-          .select("user_id, target_type, target_id")
-          .eq("user_id", userId)
-          .eq("google_recurring_event_id", recurringId);
+      const { data: existingImports } = await supabaseAdmin
+        .from("google_imported_recurrences")
+        .select("user_id, target_type, target_id")
+        .eq("user_id", userId)
+        .eq("google_recurring_event_id", recurringId);
 
-      // Se houver duplicata, prioriza provider (estado "final" esperado)
       const existingImport =
         existingImports?.find((x) => x.target_type === "provider") ??
         existingImports?.[0];
@@ -243,15 +232,11 @@ export async function importCalendarEvents(
       }
     }
 
-    // Se é provider, pula (não cria appointment do tipo session)
     if (alreadyImportedAsProvider) {
       result.skipped += group.length;
       continue;
     }
 
-    // =====================================================
-    // Fallback: procura em patients por nome
-    // =====================================================
     if (!patientId) {
       const { data: existingByName } = await supabaseAdmin
         .from("patients")
@@ -262,8 +247,6 @@ export async function importCalendarEvents(
 
       if (existingByName) {
         patientId = existingByName.id;
-
-        // Backfill: registra a recorrência para os próximos imports
         if (recurringId) {
           await supabaseAdmin
             .from("google_imported_recurrences")
@@ -277,9 +260,6 @@ export async function importCalendarEvents(
       }
     }
 
-    // =====================================================
-    // Se ainda não achou, cria um provisório novo
-    // =====================================================
     if (!patientId) {
       const { data: patient, error: patientError } = await supabaseAdmin
         .from("patients")
@@ -304,7 +284,6 @@ export async function importCalendarEvents(
       result.importedPatients++;
       result.patients.push({ id: patient.id, full_name: rawName });
 
-      // Registra a recorrência
       if (recurringId) {
         await supabaseAdmin
           .from("google_imported_recurrences")
@@ -317,16 +296,20 @@ export async function importCalendarEvents(
       }
     }
 
-    // =====================================================
-    // Cria os appointments (um por ocorrência)
-    // =====================================================
+    // Cria os appointments (um por ocorrência) com a data local correta
     const rows = group
       .filter((ev) => ev.id && ev.start?.dateTime && ev.end?.dateTime)
       .map((ev) => {
         const occStart = new Date(ev.start!.dateTime!);
-        const occDate = `${occStart.getFullYear()}-${String(
-          occStart.getMonth() + 1
-        ).padStart(2, "0")}-${String(occStart.getDate()).padStart(2, "0")}`;
+        
+        // Extrai a data YYYY-MM-DD respeitando o fuso do Brasil
+        const occDateFormatter = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/Sao_Paulo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        });
+        const occDate = occDateFormatter.format(occStart); 
 
         return {
           user_id: userId,
@@ -343,7 +326,6 @@ export async function importCalendarEvents(
         };
       });
 
-    // Idempotência dos appointments por google_event_id
     const existingIds = rows.map((r) => r.google_event_id);
     const { data: existing } = await supabaseAdmin
       .from("appointments")
