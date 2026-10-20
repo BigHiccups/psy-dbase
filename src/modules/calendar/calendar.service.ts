@@ -2,7 +2,6 @@ import { google } from "googleapis";
 import { supabaseAdmin } from "../../lib/supabase.js";
 import { env } from "../../config/env.js";
 
-// Cria o cliente OAuth2 configurado com nossas credenciais
 function createOAuthClient() {
   return new google.auth.OAuth2(
     env.googleClientId,
@@ -11,33 +10,22 @@ function createOAuthClient() {
   );
 }
 
-// Gera a URL de autorização do Google
-// O usuário acessa essa URL, autoriza, e o Google chama nosso callback
 export function getAuthUrl(userId: string): string {
   const oauth2Client = createOAuthClient();
-
   return oauth2Client.generateAuthUrl({
-    access_type: "offline",              // garante refresh_token
-    prompt: "consent select_account",    // força consentimento + escolha de conta
-    scope: [
-      "https://www.googleapis.com/auth/calendar",
-    ],
-    // Passa o userId no state para recuperar no callback
+    access_type: "offline",
+    prompt: "consent select_account",
+    scope: ["https://www.googleapis.com/auth/calendar"],
     state: userId,
   });
 }
 
-// Troca o code pelo refresh_token e salva no banco
 export async function handleCallback(code: string, userId: string) {
   const oauth2Client = createOAuthClient();
-
   const { tokens } = await oauth2Client.getToken(code);
 
   if (!tokens.refresh_token) {
-    throw new Error(
-      "O Google não retornou refresh_token. " +
-      "Remova o acesso do app em myaccount.google.com/permissions e tente novamente."
-    );
+    throw new Error("O Google não retornou refresh_token.");
   }
 
   const { error } = await supabaseAdmin
@@ -46,19 +34,14 @@ export async function handleCallback(code: string, userId: string) {
       user_id: userId,
       refresh_token: tokens.refresh_token,
       access_token: tokens.access_token ?? null,
-      expires_at: tokens.expiry_date
-        ? new Date(tokens.expiry_date).toISOString()
-        : null,
+      expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null,
       scope: tokens.scope ?? "https://www.googleapis.com/auth/calendar",
       updated_at: new Date().toISOString(),
     });
 
-  if (error) {
-    throw new Error("Falha ao salvar credenciais do Google: " + error.message);
-  }
+  if (error) throw new Error("Falha ao salvar credenciais: " + error.message);
 }
 
-// Verifica se o usuário já conectou o Google Calendar
 export async function getConnectionStatus(userId: string) {
   const { data, error } = await supabaseAdmin
     .from("google_credentials")
@@ -66,9 +49,7 @@ export async function getConnectionStatus(userId: string) {
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (error) {
-    throw new Error("Falha ao consultar credenciais: " + error.message);
-  }
+  if (error) throw new Error("Falha ao consultar credenciais: " + error.message);
 
   return {
     connected: !!data,
@@ -77,8 +58,6 @@ export async function getConnectionStatus(userId: string) {
   };
 }
 
-// Cria um cliente autenticado para chamar a API do Calendar
-// (renova o access token automaticamente se estiver expirado)
 export async function getAuthorizedClient(userId: string) {
   const { data, error } = await supabaseAdmin
     .from("google_credentials")
@@ -92,31 +71,22 @@ export async function getAuthorizedClient(userId: string) {
 
   const oauth2Client = createOAuthClient();
   oauth2Client.setCredentials({ refresh_token: data.refresh_token });
-
   return oauth2Client;
 }
 
-// Desconecta (remove credenciais)
 export async function disconnect(userId: string) {
   const { error } = await supabaseAdmin
     .from("google_credentials")
     .delete()
     .eq("user_id", userId);
 
-  if (error) {
-    throw new Error("Falha ao desconectar: " + error.message);
-  }
+  if (error) throw new Error("Falha ao desconectar: " + error.message);
 }
 
 // =========================================================
-// Google Calendar API
+// Listagem de eventos
 // =========================================================
-
-export async function listEvents(
-  userId: string,
-  timeMin: string,
-  timeMax: string
-) {
+export async function listEvents(userId: string, timeMin: string, timeMax: string) {
   const auth = await getAuthorizedClient(userId);
   const calendar = google.calendar({ version: "v3", auth });
 
@@ -124,8 +94,9 @@ export async function listEvents(
     calendarId: "primary",
     timeMin,
     timeMax,
-    singleEvents: true,       // expande eventos recorrentes em ocorrências
+    singleEvents: true,
     orderBy: "startTime",
+    timeZone: "America/Sao_Paulo", // <--- FORÇA O FUSO DO BRASIL AQUI
     maxResults: 2500,
   });
 
@@ -133,9 +104,8 @@ export async function listEvents(
 }
 
 // =========================================================
-// Importação da agenda do Google
+// Importação
 // =========================================================
-
 type ImportResult = {
   importedEvents: number;
   importedAppointments: number;
@@ -152,13 +122,8 @@ export async function importCalendarEvents(
   const end = new Date();
   end.setDate(end.getDate() + daysAhead);
 
-  const events = await listEvents(
-    userId,
-    now.toISOString(),
-    end.toISOString()
-  );
+  const events = await listEvents(userId, now.toISOString(), end.toISOString());
 
-  // Agrupa por recurringEventId (eventos avulsos viram seu próprio grupo)
   const groups = new Map<string, typeof events>();
   for (const ev of events) {
     const key = ev.recurringEventId ?? ev.id ?? "";
@@ -175,36 +140,42 @@ export async function importCalendarEvents(
     patients: [],
   };
 
+  // Formatter para extrair data YYYY-MM-DD no fuso do Brasil
+  const isoDateFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  // Formatter para extrair hora HH:MM
+  const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  // Formatter para extrair o dia da semana (0-6)
+  const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "short",
+  });
+  const weekdayMap: Record<string, number> = {
+    "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6,
+  };
+
   for (const [, group] of groups) {
     const first = group[0];
-
     if (!first.start?.dateTime || !first.end?.dateTime) continue;
 
     const start = new Date(first.start.dateTime);
     const endDt = new Date(first.end.dateTime);
 
-    // FORÇA O FUSO HORÁRIO DO BRASIL
-    const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
-      timeZone: "America/Sao_Paulo",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
     const startTime = timeFormatter.format(start);
-
-    const dateFormatter = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Sao_Paulo",
-      weekday: "short",
-    });
-    const weekdayStr = dateFormatter.format(start);
-    const weekdayMap: Record<string, number> = {
-      "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6
-    };
+    const weekdayStr = weekdayFormatter.format(start);
     const weekday = weekdayMap[weekdayStr];
-
-    const durationMin = Math.round(
-      (endDt.getTime() - start.getTime()) / 60000
-    );
+    const durationMin = Math.round((endDt.getTime() - start.getTime()) / 60000);
 
     const rawName = first.summary ?? "Sem nome";
     const recurringId = first.recurringEventId ?? first.id ?? null;
@@ -219,16 +190,11 @@ export async function importCalendarEvents(
         .eq("user_id", userId)
         .eq("google_recurring_event_id", recurringId);
 
-      const existingImport =
-        existingImports?.find((x) => x.target_type === "provider") ??
-        existingImports?.[0];
+      const existingImport = existingImports?.find((x) => x.target_type === "provider") ?? existingImports?.[0];
 
       if (existingImport) {
-        if (existingImport.target_type === "patient") {
-          patientId = existingImport.target_id;
-        } else {
-          alreadyImportedAsProvider = true;
-        }
+        if (existingImport.target_type === "patient") patientId = existingImport.target_id;
+        else alreadyImportedAsProvider = true;
       }
     }
 
@@ -248,14 +214,12 @@ export async function importCalendarEvents(
       if (existingByName) {
         patientId = existingByName.id;
         if (recurringId) {
-          await supabaseAdmin
-            .from("google_imported_recurrences")
-            .insert({
-              user_id: userId,
-              google_recurring_event_id: recurringId,
-              target_type: "patient",
-              target_id: existingByName.id,
-            });
+          await supabaseAdmin.from("google_imported_recurrences").insert({
+            user_id: userId,
+            google_recurring_event_id: recurringId,
+            target_type: "patient",
+            target_id: existingByName.id,
+          });
         }
       }
     }
@@ -273,10 +237,7 @@ export async function importCalendarEvents(
         .single();
 
       if (patientError || !patient) {
-        console.warn(
-          "[calendar.import] falha ao criar paciente:",
-          patientError?.message
-        );
+        console.warn("[calendar.import] falha ao criar paciente:", patientError?.message);
         continue;
       }
 
@@ -285,39 +246,32 @@ export async function importCalendarEvents(
       result.patients.push({ id: patient.id, full_name: rawName });
 
       if (recurringId) {
-        await supabaseAdmin
-          .from("google_imported_recurrences")
-          .insert({
-            user_id: userId,
-            google_recurring_event_id: recurringId,
-            target_type: "patient",
-            target_id: patient.id,
-          });
+        await supabaseAdmin.from("google_imported_recurrences").insert({
+          user_id: userId,
+          google_recurring_event_id: recurringId,
+          target_type: "patient",
+          target_id: patient.id,
+        });
       }
     }
 
-    // Cria os appointments (um por ocorrência) com a data local correta
+    // AQUI ESTÁ A MÁGICA: Cada ocorrência tem a sua própria data/hora no fuso local
     const rows = group
       .filter((ev) => ev.id && ev.start?.dateTime && ev.end?.dateTime)
       .map((ev) => {
         const occStart = new Date(ev.start!.dateTime!);
+        const occEnd = new Date(ev.end!.dateTime!);
         
-        // Extrai a data YYYY-MM-DD respeitando o fuso do Brasil
-        const occDateFormatter = new Intl.DateTimeFormat("en-CA", {
-          timeZone: "America/Sao_Paulo",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-        });
-        const occDate = occDateFormatter.format(occStart); 
+        const occDate = isoDateFormatter.format(occStart);
+        const occDuration = Math.round((occEnd.getTime() - occStart.getTime()) / 60000);
 
         return {
           user_id: userId,
           patient_id: patientId,
           type: "session" as const,
-          weekday,
-          start_time: startTime,
-          duration_min: durationMin,
+          weekday, // Nota: se um dia a pessoa mudar o dia do evento no Google, isso pode precisar ser ajustado
+          start_time: startTime, // Usando o horário base do grupo (que foi o primeiro)
+          duration_min: occDuration > 0 ? occDuration : durationMin,
           starts_on: occDate,
           ends_on: occDate,
           is_recurring: true,
@@ -332,14 +286,10 @@ export async function importCalendarEvents(
       .select("google_event_id")
       .in("google_event_id", existingIds);
 
-    const existingSet = new Set(
-      (existing ?? []).map((e) => e.google_event_id)
-    );
-
+    const existingSet = new Set((existing ?? []).map((e) => e.google_event_id));
     const newRows = rows.filter((r) => !existingSet.has(r.google_event_id));
 
     result.skipped += rows.length - newRows.length;
-
     if (newRows.length === 0) continue;
 
     const { error: apptError, count } = await supabaseAdmin
@@ -347,10 +297,7 @@ export async function importCalendarEvents(
       .insert(newRows, { count: "exact" });
 
     if (apptError) {
-      console.warn(
-        "[calendar.import] falha ao criar appointments:",
-        apptError.message
-      );
+      console.warn("[calendar.import] falha ao criar appointments:", apptError.message);
       continue;
     }
 
