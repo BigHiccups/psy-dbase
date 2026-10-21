@@ -127,27 +127,20 @@ export async function importCalendarEvents(
 
   const result: ImportResult = {
     importedEvents: events.length,
-    importedAppointments: 0,
+    importedAppointments: 0, // Vai ficar 0 agora, pq a agenda só popula na aprovação
     importedPatients: 0,
     skipped: 0,
     patients: [],
   };
 
   const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
-    timeZone: "America/Sao_Paulo",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
+    timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit", hour12: false,
   });
   const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Sao_Paulo",
-    weekday: "short",
+    timeZone: "America/Sao_Paulo", weekday: "short",
   });
   const isoDateFormatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Sao_Paulo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
+    timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit",
   });
   const weekdayMap: Record<string, number> = {
     "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6,
@@ -167,6 +160,7 @@ export async function importCalendarEvents(
     if (startTime === "24:00") startTime = "00:00";
     
     const weekday = weekdayMap[weekdayFormatter.format(start)] ?? 1;
+    const anchorDate = isoDateFormatter.format(start);
     
     let durationMin = 60;
     if (first.end?.dateTime && first.start?.dateTime) {
@@ -182,7 +176,6 @@ export async function importCalendarEvents(
     let patientId: string | null = null;
     let alreadyImportedAsProvider = false;
 
-    // 1. Procura na tabela de recorrências
     if (recurringId) {
       const { data: existingImports } = await supabaseAdmin
         .from("google_imported_recurrences")
@@ -194,17 +187,8 @@ export async function importCalendarEvents(
 
       if (existingImport) {
         if (existingImport.target_type === "patient") {
-          // VERIFICAÇÃO CRUCIAL: O paciente ainda existe no banco?
-          const { data: checkPatient } = await supabaseAdmin
-            .from("patients")
-            .select("id")
-            .eq("id", existingImport.target_id)
-            .maybeSingle();
-            
-          if (checkPatient) {
-            patientId = existingImport.target_id; // Só usa se realmente existir
-          }
-          // Se não existir, o patientId continua null e ele vai criar um novo abaixo
+          const { data: checkPatient } = await supabaseAdmin.from("patients").select("id").eq("id", existingImport.target_id).maybeSingle();
+          if (checkPatient) patientId = existingImport.target_id;
         } else {
           alreadyImportedAsProvider = true;
         }
@@ -216,32 +200,16 @@ export async function importCalendarEvents(
       continue;
     }
 
-    // 2. Se não achou na recorrência (ou o paciente foi apagado), procura pelo ID do Google
     if (!patientId && recurringId) {
-       const { data: existingByRec } = await supabaseAdmin
-         .from("patients")
-         .select("id")
-         .eq("user_id", userId)
-         .eq("google_recurring_event_id", recurringId)
-         .maybeSingle();
+       const { data: existingByRec } = await supabaseAdmin.from("patients").select("id").eq("user_id", userId).eq("google_recurring_event_id", recurringId).maybeSingle();
        if (existingByRec) patientId = existingByRec.id;
     }
 
-    // 3. Se ainda não achou, procura pelo nome
     if (!patientId) {
-      const { data: existingByName } = await supabaseAdmin
-        .from("patients")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("full_name", rawName)
-        .maybeSingle();
-
-      if (existingByName) {
-        patientId = existingByName.id;
-      }
+      const { data: existingByName } = await supabaseAdmin.from("patients").select("id").eq("user_id", userId).eq("full_name", rawName).maybeSingle();
+      if (existingByName) patientId = existingByName.id;
     }
 
-    // 4. Se não achou de jeito nenhum, cria um novo
     if (!patientId) {
       const { data: patient, error: patientError } = await supabaseAdmin
         .from("patients")
@@ -254,17 +222,13 @@ export async function importCalendarEvents(
         .select()
         .single();
 
-      if (patientError || !patient) {
-        console.error("[calendar.import] ERRO AO CRIAR PACIENTE:", patientError?.message, "Nome:", rawName);
-        continue; // Pula esse grupo se não conseguir criar o paciente
-      }
+      if (patientError || !patient) continue;
 
       patientId = patient.id;
       result.importedPatients++;
       result.patients.push({ id: patient.id, full_name: rawName });
     }
 
-    // Atualiza/Cria o registro de recorrência (usando upsert)
     if (recurringId && patientId) {
       await supabaseAdmin.from("google_imported_recurrences").upsert({
         user_id: userId,
@@ -274,59 +238,34 @@ export async function importCalendarEvents(
       }, { onConflict: "user_id,google_recurring_event_id" });
     }
 
-    const rows = group
-      .map((ev) => {
-        let evStartStr = ev.start?.dateTime;
-        if (!evStartStr && ev.start?.date) {
-           evStartStr = `${ev.start.date}T08:00:00`;
-        }
-        if (!evStartStr || !ev.id) return null;
+    // =====================================================
+    // AQUI ESTÁ A MÁGICA: Salvamos na tabela de horários, 
+    // NÃO na tabela de agendamentos (appointments).
+    // =====================================================
+    if (patientId) {
+      const { data: existingSched } = await supabaseAdmin
+        .from("patient_schedules")
+        .select("id")
+        .eq("patient_id", patientId)
+        .eq("weekday", weekday)
+        .eq("start_time", startTime)
+        .maybeSingle();
 
-        const occStart = new Date(evStartStr);
-        const occDate = isoDateFormatter.format(occStart);
-
-        return {
+      if (!existingSched) {
+        await supabaseAdmin.from("patient_schedules").insert({
           user_id: userId,
           patient_id: patientId,
-          type: "session" as const,
-          weekday,
+          weekday: weekday,
           start_time: startTime,
           duration_min: durationMin,
-          starts_on: occDate,
-          ends_on: occDate,
-          is_recurring: true,
-          status: "active" as const,
-          google_event_id: ev.id,
-        };
-      })
-      .filter((r) => r !== null) as any[];
-
-    const existingIds = rows.map((r) => r.google_event_id);
-    const { data: existing } = await supabaseAdmin
-      .from("appointments")
-      .select("google_event_id")
-      .in("google_event_id", existingIds);
-
-    const existingSet = new Set((existing ?? []).map((e) => e.google_event_id));
-    const newRows = rows.filter((r) => !existingSet.has(r.google_event_id));
-
-    result.skipped += rows.length - newRows.length;
-
-    let insertedCount = 0;
-    for (const row of newRows) {
-      const { error: apptError } = await supabaseAdmin
-        .from("appointments")
-        .insert(row);
-
-      if (apptError) {
-        console.error("[calendar.import] ERRO AGENDAMENTO:", apptError.message, "Paciente:", row.patient_id);
-        result.skipped++;
+          recurrence_type: group.length > 1 ? "weekly" : "once",
+          anchor_date: anchorDate,
+        });
+        result.importedAppointments++; // Conta como sucesso, mas salva como horário
       } else {
-        insertedCount++;
+        result.skipped++;
       }
     }
-
-    result.importedAppointments += insertedCount;
   }
 
   return result;
