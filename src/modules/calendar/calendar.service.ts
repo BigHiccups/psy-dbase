@@ -83,9 +83,6 @@ export async function disconnect(userId: string) {
   if (error) throw new Error("Falha ao desconectar: " + error.message);
 }
 
-// =========================================================
-// Listagem de eventos
-// =========================================================
 export async function listEvents(userId: string, timeMin: string, timeMax: string) {
   const auth = await getAuthorizedClient(userId);
   const calendar = google.calendar({ version: "v3", auth });
@@ -96,16 +93,12 @@ export async function listEvents(userId: string, timeMin: string, timeMax: strin
     timeMax,
     singleEvents: true,
     orderBy: "startTime",
-    // REMOVIDO: timeZone: "America/Sao_Paulo" para evitar que o Google oculte a hora
     maxResults: 2500,
   });
 
   return res.data.items ?? [];
 }
 
-// =========================================================
-// Importação
-// =========================================================
 type ImportResult = {
   importedEvents: number;
   importedAppointments: number;
@@ -140,55 +133,43 @@ export async function importCalendarEvents(
     patients: [],
   };
 
-  const isoDateFormatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Sao_Paulo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-
-  const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
-    timeZone: "America/Sao_Paulo",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-
-  const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Sao_Paulo",
-    weekday: "short",
-  });
-  const weekdayMap: Record<string, number> = {
-    "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6,
-  };
-
   for (const [, group] of groups) {
     const first = group[0];
 
-    // =====================================================
-    // TRATAMENTO DE EVENTOS ALL-DAY OU SEM HORA
-    // =====================================================
-    let startDateTimeStr = first.start?.dateTime;
-    
-    // Se não tiver hora, mas tiver data (All-day event), assumimos 08:00
-    if (!startDateTimeStr && first.start?.date) {
-      startDateTimeStr = `${first.start.date}T08:00:00`;
+    // O código original parava aqui se não tivesse dateTime
+    if (!first.start?.dateTime || !first.end?.dateTime) {
+      console.log("[calendar.import] Pulando grupo (sem dateTime):", first.summary);
+      continue;
     }
 
-    if (!startDateTimeStr) continue; // Se não tiver nem data, aí sim pulamos
+    const start = new Date(first.start.dateTime);
+    const endDt = new Date(first.end.dateTime);
 
-    const start = new Date(startDateTimeStr);
-    
-    // Se for all-day, a duração é 60min. Se não, calculamos a diferença
-    let durationMin = 60;
-    if (first.end?.dateTime && first.start?.dateTime) {
-       const endDt = new Date(first.end.dateTime);
-       durationMin = Math.round((endDt.getTime() - start.getTime()) / 60000);
-    }
+    // --- CORREÇÃO 1: FUSO HORÁRIO ---
+    const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
+      timeZone: "America/Sao_Paulo",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    let startTime = timeFormatter.format(start);
+    if (startTime === "24:00") startTime = "00:00";
 
-    const startTime = timeFormatter.format(start);
+    const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Sao_Paulo",
+      weekday: "short",
+    });
     const weekdayStr = weekdayFormatter.format(start);
-    const weekday = weekdayMap[weekdayStr];
+    const weekdayMap: Record<string, number> = {
+      "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6,
+    };
+    const weekday = weekdayMap[weekdayStr] ?? 1;
+
+    // --- CORREÇÃO 2: DURAÇÃO (O BANCO EXIGE 15 A 240 MINUTOS) ---
+    let durationMin = Math.round((endDt.getTime() - start.getTime()) / 60000);
+    if (durationMin < 15) durationMin = 50; // Se vier 0 ou negativo, assume 50
+    if (durationMin > 240) durationMin = 240; // Se vier muito longo, trava em 240
+    // -------------------------------------------------------------
 
     const rawName = first.summary ?? "Sem nome";
     const recurringId = first.recurringEventId ?? first.id ?? null;
@@ -269,15 +250,17 @@ export async function importCalendarEvents(
     }
 
     const rows = group
+      .filter((ev) => ev.id && ev.start?.dateTime && ev.end?.dateTime)
       .map((ev) => {
-        let evStartStr = ev.start?.dateTime;
-        if (!evStartStr && ev.start?.date) {
-           evStartStr = `${ev.start.date}T08:00:00`;
-        }
+        const occStart = new Date(ev.start!.dateTime!);
         
-        if (!evStartStr || !ev.id) return null;
-
-        const occStart = new Date(evStartStr);
+        // Extrai a data corretamente no fuso do Brasil
+        const isoDateFormatter = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/Sao_Paulo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        });
         const occDate = isoDateFormatter.format(occStart);
 
         return {
@@ -291,10 +274,9 @@ export async function importCalendarEvents(
           ends_on: occDate,
           is_recurring: true,
           status: "active" as const,
-          google_event_id: ev.id,
+          google_event_id: ev.id!,
         };
-      })
-      .filter((r) => r !== null) as any[];
+      });
 
     const existingIds = rows.map((r) => r.google_event_id);
     const { data: existing } = await supabaseAdmin
@@ -313,7 +295,13 @@ export async function importCalendarEvents(
       .insert(newRows, { count: "exact" });
 
     if (apptError) {
-      console.warn("[calendar.import] falha ao criar appointments:", apptError.message);
+      // MUDANÇA CRUCIAL: console.error para aparecer em vermelho nos logs da Vercel
+      console.error(
+        "[calendar.import] FALHA AO INSERIR NO BANCO:",
+        apptError.message,
+        "Dados:",
+        JSON.stringify(newRows[0], null, 2)
+      );
       continue;
     }
 
