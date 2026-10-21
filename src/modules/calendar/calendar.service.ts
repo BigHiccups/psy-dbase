@@ -193,8 +193,21 @@ export async function importCalendarEvents(
       const existingImport = existingImports?.find((x) => x.target_type === "provider") ?? existingImports?.[0];
 
       if (existingImport) {
-        if (existingImport.target_type === "patient") patientId = existingImport.target_id;
-        else alreadyImportedAsProvider = true;
+        if (existingImport.target_type === "patient") {
+          // VERIFICAÇÃO CRUCIAL: O paciente ainda existe no banco?
+          const { data: checkPatient } = await supabaseAdmin
+            .from("patients")
+            .select("id")
+            .eq("id", existingImport.target_id)
+            .maybeSingle();
+            
+          if (checkPatient) {
+            patientId = existingImport.target_id; // Só usa se realmente existir
+          }
+          // Se não existir, o patientId continua null e ele vai criar um novo abaixo
+        } else {
+          alreadyImportedAsProvider = true;
+        }
       }
     }
 
@@ -203,7 +216,7 @@ export async function importCalendarEvents(
       continue;
     }
 
-    // 2. Se não achou na recorrência, procura direto no banco de pacientes pelo ID do Google
+    // 2. Se não achou na recorrência (ou o paciente foi apagado), procura pelo ID do Google
     if (!patientId && recurringId) {
        const { data: existingByRec } = await supabaseAdmin
          .from("patients")
@@ -214,7 +227,7 @@ export async function importCalendarEvents(
        if (existingByRec) patientId = existingByRec.id;
     }
 
-    // 3. Se ainda não achou, procura pelo nome exato
+    // 3. Se ainda não achou, procura pelo nome
     if (!patientId) {
       const { data: existingByName } = await supabaseAdmin
         .from("patients")
@@ -242,7 +255,7 @@ export async function importCalendarEvents(
         .single();
 
       if (patientError || !patient) {
-        console.error("[calendar.import] ERRO AO CRIAR PACIENTE:", patientError?.message, "Nome:", rawName, "RecID:", recurringId);
+        console.error("[calendar.import] ERRO AO CRIAR PACIENTE:", patientError?.message, "Nome:", rawName);
         continue; // Pula esse grupo se não conseguir criar o paciente
       }
 
@@ -251,7 +264,7 @@ export async function importCalendarEvents(
       result.patients.push({ id: patient.id, full_name: rawName });
     }
 
-    // Atualiza/Cria o registro de recorrência (usando upsert para evitar erro de duplicidade)
+    // Atualiza/Cria o registro de recorrência (usando upsert)
     if (recurringId && patientId) {
       await supabaseAdmin.from("google_imported_recurrences").upsert({
         user_id: userId,
@@ -299,7 +312,6 @@ export async function importCalendarEvents(
 
     result.skipped += rows.length - newRows.length;
 
-    // Insere um por um para não quebrar o lote se der erro em um
     let insertedCount = 0;
     for (const row of newRows) {
       const { error: apptError } = await supabaseAdmin
@@ -307,7 +319,7 @@ export async function importCalendarEvents(
         .insert(row);
 
       if (apptError) {
-        console.error("[calendar.import] ERRO AO CRIAR AGENDAMENTO:", apptError.message, "Evento:", row.google_event_id);
+        console.error("[calendar.import] ERRO AGENDAMENTO:", apptError.message, "Paciente:", row.patient_id);
         result.skipped++;
       } else {
         insertedCount++;
