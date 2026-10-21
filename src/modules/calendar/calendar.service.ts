@@ -96,7 +96,7 @@ export async function listEvents(userId: string, timeMin: string, timeMax: strin
     timeMax,
     singleEvents: true,
     orderBy: "startTime",
-    timeZone: "America/Sao_Paulo", // <--- FORÇA O FUSO DO BRASIL AQUI
+    // REMOVIDO: timeZone: "America/Sao_Paulo" para evitar que o Google oculte a hora
     maxResults: 2500,
   });
 
@@ -140,7 +140,6 @@ export async function importCalendarEvents(
     patients: [],
   };
 
-  // Formatter para extrair data YYYY-MM-DD no fuso do Brasil
   const isoDateFormatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",
     year: "numeric",
@@ -148,7 +147,6 @@ export async function importCalendarEvents(
     day: "2-digit",
   });
 
-  // Formatter para extrair hora HH:MM
   const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
     hour: "2-digit",
@@ -156,7 +154,6 @@ export async function importCalendarEvents(
     hour12: false,
   });
 
-  // Formatter para extrair o dia da semana (0-6)
   const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Sao_Paulo",
     weekday: "short",
@@ -167,15 +164,31 @@ export async function importCalendarEvents(
 
   for (const [, group] of groups) {
     const first = group[0];
-    if (!first.start?.dateTime || !first.end?.dateTime) continue;
 
-    const start = new Date(first.start.dateTime);
-    const endDt = new Date(first.end.dateTime);
+    // =====================================================
+    // TRATAMENTO DE EVENTOS ALL-DAY OU SEM HORA
+    // =====================================================
+    let startDateTimeStr = first.start?.dateTime;
+    
+    // Se não tiver hora, mas tiver data (All-day event), assumimos 08:00
+    if (!startDateTimeStr && first.start?.date) {
+      startDateTimeStr = `${first.start.date}T08:00:00`;
+    }
+
+    if (!startDateTimeStr) continue; // Se não tiver nem data, aí sim pulamos
+
+    const start = new Date(startDateTimeStr);
+    
+    // Se for all-day, a duração é 60min. Se não, calculamos a diferença
+    let durationMin = 60;
+    if (first.end?.dateTime && first.start?.dateTime) {
+       const endDt = new Date(first.end.dateTime);
+       durationMin = Math.round((endDt.getTime() - start.getTime()) / 60000);
+    }
 
     const startTime = timeFormatter.format(start);
     const weekdayStr = weekdayFormatter.format(start);
     const weekday = weekdayMap[weekdayStr];
-    const durationMin = Math.round((endDt.getTime() - start.getTime()) / 60000);
 
     const rawName = first.summary ?? "Sem nome";
     const recurringId = first.recurringEventId ?? first.id ?? null;
@@ -255,30 +268,33 @@ export async function importCalendarEvents(
       }
     }
 
-    // AQUI ESTÁ A MÁGICA: Cada ocorrência tem a sua própria data/hora no fuso local
     const rows = group
-      .filter((ev) => ev.id && ev.start?.dateTime && ev.end?.dateTime)
       .map((ev) => {
-        const occStart = new Date(ev.start!.dateTime!);
-        const occEnd = new Date(ev.end!.dateTime!);
+        let evStartStr = ev.start?.dateTime;
+        if (!evStartStr && ev.start?.date) {
+           evStartStr = `${ev.start.date}T08:00:00`;
+        }
         
+        if (!evStartStr || !ev.id) return null;
+
+        const occStart = new Date(evStartStr);
         const occDate = isoDateFormatter.format(occStart);
-        const occDuration = Math.round((occEnd.getTime() - occStart.getTime()) / 60000);
 
         return {
           user_id: userId,
           patient_id: patientId,
           type: "session" as const,
-          weekday, // Nota: se um dia a pessoa mudar o dia do evento no Google, isso pode precisar ser ajustado
-          start_time: startTime, // Usando o horário base do grupo (que foi o primeiro)
-          duration_min: occDuration > 0 ? occDuration : durationMin,
+          weekday,
+          start_time: startTime,
+          duration_min: durationMin,
           starts_on: occDate,
           ends_on: occDate,
           is_recurring: true,
           status: "active" as const,
-          google_event_id: ev.id!,
+          google_event_id: ev.id,
         };
-      });
+      })
+      .filter((r) => r !== null) as any[];
 
     const existingIds = rows.map((r) => r.google_event_id);
     const { data: existing } = await supabaseAdmin
