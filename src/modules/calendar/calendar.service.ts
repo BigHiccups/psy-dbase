@@ -133,7 +133,6 @@ export async function importCalendarEvents(
     patients: [],
   };
 
-  // Formatadores de fuso horário do Brasil
   const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
     hour: "2-digit",
@@ -157,7 +156,6 @@ export async function importCalendarEvents(
   for (const [, group] of groups) {
     const first = group[0];
 
-    // Correção: se for evento de dia inteiro, assume 08:00
     let startDateTimeStr = first.start?.dateTime;
     if (!startDateTimeStr && first.start?.date) {
       startDateTimeStr = `${first.start.date}T08:00:00`;
@@ -165,12 +163,11 @@ export async function importCalendarEvents(
     if (!startDateTimeStr) continue;
 
     const start = new Date(startDateTimeStr);
-    
     let startTime = timeFormatter.format(start);
     if (startTime === "24:00") startTime = "00:00";
+    
     const weekday = weekdayMap[weekdayFormatter.format(start)] ?? 1;
     
-    // Correção: Trava a duração entre 15 e 240 minutos
     let durationMin = 60;
     if (first.end?.dateTime && first.start?.dateTime) {
       const endDt = new Date(first.end.dateTime);
@@ -185,6 +182,7 @@ export async function importCalendarEvents(
     let patientId: string | null = null;
     let alreadyImportedAsProvider = false;
 
+    // 1. Procura na tabela de recorrências
     if (recurringId) {
       const { data: existingImports } = await supabaseAdmin
         .from("google_imported_recurrences")
@@ -205,6 +203,18 @@ export async function importCalendarEvents(
       continue;
     }
 
+    // 2. Se não achou na recorrência, procura direto no banco de pacientes pelo ID do Google
+    if (!patientId && recurringId) {
+       const { data: existingByRec } = await supabaseAdmin
+         .from("patients")
+         .select("id")
+         .eq("user_id", userId)
+         .eq("google_recurring_event_id", recurringId)
+         .maybeSingle();
+       if (existingByRec) patientId = existingByRec.id;
+    }
+
+    // 3. Se ainda não achou, procura pelo nome exato
     if (!patientId) {
       const { data: existingByName } = await supabaseAdmin
         .from("patients")
@@ -215,17 +225,10 @@ export async function importCalendarEvents(
 
       if (existingByName) {
         patientId = existingByName.id;
-        if (recurringId) {
-          await supabaseAdmin.from("google_imported_recurrences").insert({
-            user_id: userId,
-            google_recurring_event_id: recurringId,
-            target_type: "patient",
-            target_id: existingByName.id,
-          });
-        }
       }
     }
 
+    // 4. Se não achou de jeito nenhum, cria um novo
     if (!patientId) {
       const { data: patient, error: patientError } = await supabaseAdmin
         .from("patients")
@@ -239,24 +242,25 @@ export async function importCalendarEvents(
         .single();
 
       if (patientError || !patient) {
-        continue;
+        console.error("[calendar.import] ERRO AO CRIAR PACIENTE:", patientError?.message, "Nome:", rawName, "RecID:", recurringId);
+        continue; // Pula esse grupo se não conseguir criar o paciente
       }
 
       patientId = patient.id;
       result.importedPatients++;
       result.patients.push({ id: patient.id, full_name: rawName });
-
-      if (recurringId) {
-        await supabaseAdmin.from("google_imported_recurrences").insert({
-          user_id: userId,
-          google_recurring_event_id: recurringId,
-          target_type: "patient",
-          target_id: patient.id,
-        });
-      }
     }
 
-    // Monta as linhas do grupo
+    // Atualiza/Cria o registro de recorrência (usando upsert para evitar erro de duplicidade)
+    if (recurringId && patientId) {
+      await supabaseAdmin.from("google_imported_recurrences").upsert({
+        user_id: userId,
+        google_recurring_event_id: recurringId,
+        target_type: "patient",
+        target_id: patientId,
+      }, { onConflict: "user_id,google_recurring_event_id" });
+    }
+
     const rows = group
       .map((ev) => {
         let evStartStr = ev.start?.dateTime;
@@ -293,7 +297,9 @@ export async function importCalendarEvents(
     const existingSet = new Set((existing ?? []).map((e) => e.google_event_id));
     const newRows = rows.filter((r) => !existingSet.has(r.google_event_id));
 
-    // Correção Suprema: Insere um por um (não falha o lote inteiro)
+    result.skipped += rows.length - newRows.length;
+
+    // Insere um por um para não quebrar o lote se der erro em um
     let insertedCount = 0;
     for (const row of newRows) {
       const { error: apptError } = await supabaseAdmin
@@ -301,7 +307,7 @@ export async function importCalendarEvents(
         .insert(row);
 
       if (apptError) {
-        // Se der erro de duplicidade, apenas pulamos
+        console.error("[calendar.import] ERRO AO CRIAR AGENDAMENTO:", apptError.message, "Evento:", row.google_event_id);
         result.skipped++;
       } else {
         insertedCount++;
