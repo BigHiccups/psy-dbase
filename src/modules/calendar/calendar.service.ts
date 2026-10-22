@@ -189,6 +189,7 @@ export async function importCalendarEvents(
 
   // O Segredo: Envia tudo de uma vez para o SQL fazer o trabalho pesado!
   const { data: count, error } = await supabaseAdmin.rpc("bulk_import_google_calendar", {
+    p_user_id: userId, 
     p_events: payload,
   });
 
