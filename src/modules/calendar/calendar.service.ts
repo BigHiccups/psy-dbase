@@ -140,7 +140,6 @@ export async function importCalendarEvents(
     "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6,
   };
 
-  // Monta um array gigante com TUDO pronto
   const payload: any[] = [];
 
   for (const [, group] of groups) {
@@ -187,7 +186,6 @@ export async function importCalendarEvents(
     });
   }
 
-  // O Segredo: Envia tudo de uma vez para o SQL fazer o trabalho pesado!
   const { data: count, error } = await supabaseAdmin.rpc("bulk_import_google_calendar", {
     p_user_id: userId, 
     p_events: payload,
