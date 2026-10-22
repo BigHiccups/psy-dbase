@@ -160,10 +160,10 @@ export async function importCalendarEvents(
     const start = new Date(startDateTimeStr);
     let startTime = timeFormatter.format(start);
     if (startTime === "24:00") startTime = "00:00";
-    
+
     const weekday = weekdayMap[weekdayFormatter.format(start)] ?? 1;
     const anchorDate = isoDateFormatter.format(start);
-    
+
     let durationMin = 60;
     if (first.end?.dateTime && first.start?.dateTime) {
       const endDt = new Date(first.end.dateTime);
@@ -203,8 +203,8 @@ export async function importCalendarEvents(
     }
 
     if (!patientId && recurringId) {
-       const { data: existingByRec } = await supabaseAdmin.from("patients").select("id").eq("user_id", userId).eq("google_recurring_event_id", recurringId).maybeSingle();
-       if (existingByRec) patientId = existingByRec.id;
+      const { data: existingByRec } = await supabaseAdmin.from("patients").select("id").eq("user_id", userId).eq("google_recurring_event_id", recurringId).maybeSingle();
+      if (existingByRec) patientId = existingByRec.id;
     }
 
     if (!patientId) {
@@ -241,31 +241,66 @@ export async function importCalendarEvents(
     }
 
     // =====================================================
-    // AQUI ESTÁ A MÁGICA: Salvamos na tabela de horários, 
-    // NÃO na tabela de agendamentos (appointments).
+    // Salva APENAS eventos recorrentes no ScheduleEditor.
+    // Avulsos vão direto para a Agenda (appointments)
     // =====================================================
     if (patientId) {
-      const { data: existingSched } = await supabaseAdmin
-        .from("patient_schedules")
-        .select("id")
-        .eq("patient_id", patientId)
-        .eq("weekday", weekday)
-        .eq("start_time", startTime)
-        .maybeSingle();
+      const isRecurring = recurringId !== null && first.recurringEventId !== undefined;
 
-      if (!existingSched) {
-        await supabaseAdmin.from("patient_schedules").insert({
-          user_id: userId,
-          patient_id: patientId,
-          weekday: weekday,
-          start_time: startTime,
-          duration_min: durationMin,
-          recurrence_type: group.length > 1 ? "weekly" : "once",
-          anchor_date: anchorDate,
-        });
-        result.importedAppointments++; // Conta como sucesso, mas salva como horário
+      if (isRecurring) {
+        // É uma regra fixa (ex: toda quarta às 14h)
+        const { data: existingSched } = await supabaseAdmin
+          .from("patient_schedules")
+          .select("id")
+          .eq("patient_id", patientId)
+          .eq("weekday", weekday)
+          .eq("start_time", startTime)
+          .maybeSingle();
+
+        if (!existingSched) {
+          await supabaseAdmin.from("patient_schedules").insert({
+            user_id: userId,
+            patient_id: patientId,
+            weekday: weekday,
+            start_time: startTime,
+            duration_min: durationMin,
+            recurrence_type: "weekly", // Regras no Google são semanais por padrão
+            anchor_date: anchorDate,
+          });
+          result.importedAppointments++;
+        } else {
+          result.skipped++;
+        }
       } else {
-        result.skipped++;
+        // É um evento avulso (remarcação) -> Vai direto para a Agenda!
+        // Não passa pelo ScheduleEditor.
+        const { data: existingAppt } = await supabaseAdmin
+          .from("appointments")
+          .select("id")
+          .eq("user_id", userId)
+          .eq("patient_id", patientId)
+          .eq("starts_on", anchorDate)
+          .eq("start_time", startTime)
+          .maybeSingle();
+
+        if (!existingAppt) {
+          await supabaseAdmin.from("appointments").insert({
+            user_id: userId,
+            patient_id: patientId,
+            type: "session",
+            weekday: weekday,
+            start_time: startTime,
+            duration_min: durationMin,
+            starts_on: anchorDate,
+            ends_on: anchorDate,
+            is_recurring: false, // É avulso!
+            status: "active",
+            google_event_id: first.id,
+          });
+          result.importedAppointments++;
+        } else {
+          result.skipped++;
+        }
       }
     }
   }
