@@ -114,6 +114,7 @@ export async function importCalendarEvents(
   const now = new Date();
   const end = new Date();
 
+  // Busca eventos dos últimos 60 dias até 90 dias no futuro
   now.setDate(now.getDate() - 60);
   end.setDate(end.getDate() + daysAhead);
 
@@ -129,7 +130,7 @@ export async function importCalendarEvents(
 
   const result: ImportResult = {
     importedEvents: events.length,
-    importedAppointments: 0, // Vai ficar 0 agora, pq a agenda só popula na aprovação
+    importedAppointments: 0,
     importedPatients: 0,
     skipped: 0,
     patients: [],
@@ -149,7 +150,27 @@ export async function importCalendarEvents(
   };
 
   for (const [, group] of groups) {
-    const first = group[0];
+    // =====================================================
+    // CORREÇÃO: Encontra a data MAIS ANTIGA do grupo para ser a âncora
+    // =====================================================
+    let earliestEvent = group[0];
+    let earliestTime = Infinity;
+
+    for (const ev of group) {
+      let dtStr = ev.start?.dateTime;
+      if (!dtStr && ev.start?.date) {
+        dtStr = `${ev.start.date}T08:00:00`;
+      }
+      if (dtStr) {
+        const time = new Date(dtStr).getTime();
+        if (time < earliestTime) {
+          earliestTime = time;
+          earliestEvent = ev;
+        }
+      }
+    }
+
+    const first = earliestEvent; // Agora usamos o evento mais antigo como referência
 
     let startDateTimeStr = first.start?.dateTime;
     if (!startDateTimeStr && first.start?.date) {
@@ -265,7 +286,7 @@ export async function importCalendarEvents(
             start_time: startTime,
             duration_min: durationMin,
             recurrence_type: "weekly", // Regras no Google são semanais por padrão
-            anchor_date: anchorDate,
+            anchor_date: anchorDate, // Aqui vai a data mais antiga encontrada
           });
           result.importedAppointments++;
         } else {
@@ -273,7 +294,6 @@ export async function importCalendarEvents(
         }
       } else {
         // É um evento avulso (remarcação) -> Vai direto para a Agenda!
-        // Não passa pelo ScheduleEditor.
         const { data: existingAppt } = await supabaseAdmin
           .from("appointments")
           .select("id")
