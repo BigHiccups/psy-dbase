@@ -114,7 +114,6 @@ export async function importCalendarEvents(
   const now = new Date();
   const end = new Date();
 
-  // Busca eventos dos últimos 60 dias até 90 dias no futuro
   now.setDate(now.getDate() - 60);
   end.setDate(end.getDate() + daysAhead);
 
@@ -122,7 +121,10 @@ export async function importCalendarEvents(
 
   const groups = new Map<string, typeof events>();
   for (const ev of events) {
-    const key = ev.recurringEventId ?? ev.id ?? "";
+    // Se for uma exceção (remarcação), tratamos como um grupo independente
+    const isException = !!ev.originalStartTime;
+    const key = (ev.recurringEventId && !isException) ? ev.recurringEventId : ev.id;
+    
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(ev);
@@ -150,9 +152,6 @@ export async function importCalendarEvents(
   };
 
   for (const [, group] of groups) {
-    // =====================================================
-    // CORREÇÃO: Encontra a data MAIS ANTIGA do grupo para ser a âncora
-    // =====================================================
     let earliestEvent = group[0];
     let earliestTime = Infinity;
 
@@ -170,7 +169,7 @@ export async function importCalendarEvents(
       }
     }
 
-    const first = earliestEvent; // Agora usamos o evento mais antigo como referência
+    const first = earliestEvent;
 
     let startDateTimeStr = first.start?.dateTime;
     if (!startDateTimeStr && first.start?.date) {
@@ -261,15 +260,11 @@ export async function importCalendarEvents(
       }, { onConflict: "user_id,google_recurring_event_id" });
     }
 
-    // =====================================================
-    // Salva APENAS eventos recorrentes no ScheduleEditor.
-    // Avulsos vão direto para a Agenda (appointments)
-    // =====================================================
     if (patientId) {
-      const isRecurring = recurringId !== null && first.recurringEventId !== undefined;
+      // Só é regra fixa se NÃO for uma exceção
+      const isRecurring = recurringId !== null && first.recurringEventId !== undefined && !first.originalStartTime;
 
       if (isRecurring) {
-        // É uma regra fixa (ex: toda quarta às 14h)
         const { data: existingSched } = await supabaseAdmin
           .from("patient_schedules")
           .select("id")
@@ -285,15 +280,15 @@ export async function importCalendarEvents(
             weekday: weekday,
             start_time: startTime,
             duration_min: durationMin,
-            recurrence_type: "weekly", // Regras no Google são semanais por padrão
-            anchor_date: anchorDate, // Aqui vai a data mais antiga encontrada
+            recurrence_type: "weekly",
+            anchor_date: anchorDate,
           });
           result.importedAppointments++;
         } else {
           result.skipped++;
         }
       } else {
-        // É um evento avulso (remarcação) -> Vai direto para a Agenda!
+        // Vai para a agenda direto (pode ser evento avulso original ou uma exceção do dia 8)
         const { data: existingAppt } = await supabaseAdmin
           .from("appointments")
           .select("id")
@@ -313,7 +308,7 @@ export async function importCalendarEvents(
             duration_min: durationMin,
             starts_on: anchorDate,
             ends_on: anchorDate,
-            is_recurring: false, // É avulso!
+            is_recurring: false,
             status: "active",
             google_event_id: first.id,
           });
