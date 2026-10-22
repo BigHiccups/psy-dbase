@@ -114,29 +114,18 @@ export async function importCalendarEvents(
   const now = new Date();
   const end = new Date();
 
-  now.setDate(now.getDate() - 60); // 60 dias para trás
+  now.setDate(now.getDate() - 60);
   end.setDate(end.getDate() + daysAhead);
 
   const events = await listEvents(userId, now.toISOString(), end.toISOString());
 
   const groups = new Map<string, typeof events>();
   for (const ev of events) {
-    // Se for uma exceção (remarcação), tratamos como um grupo independente
-    const isException = !!ev.originalStartTime;
-    const key = (ev.recurringEventId && !isException) ? ev.recurringEventId : ev.id;
-    
+    const key = ev.recurringEventId ?? ev.id ?? "";
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(ev);
   }
-
-  const result: ImportResult = {
-    importedEvents: events.length,
-    importedAppointments: 0,
-    importedPatients: 0,
-    skipped: 0,
-    patients: [],
-  };
 
   const timeFormatter = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit", hour12: false,
@@ -151,13 +140,9 @@ export async function importCalendarEvents(
     "Sun": 0, "Mon": 1, "Tue": 2, "Wed": 3, "Thu": 4, "Fri": 5, "Sat": 6,
   };
 
-  // Listas para inserir em lote no final
-  const patientsToInsert: any[] = [];
-  const schedulesToInsert: any[] = [];
-  const appointmentsToInsert: any[] = [];
-  const recurrencesToInsert: any[] = [];
+  // Monta um array gigante com TUDO pronto
+  const payload: any[] = [];
 
-  // 1. Processa tudo em memória (MUITO RÁPIDO)
   for (const [, group] of groups) {
     let earliestEvent = group[0];
     let earliestTime = Infinity;
@@ -192,113 +177,28 @@ export async function importCalendarEvents(
       if (durationMin > 240) durationMin = 240;
     }
 
-    const rawName = first.summary ?? "Sem nome";
-    const recurringId = first.recurringEventId ?? first.id ?? null;
-
-    // Verifica se o paciente já existe (MOCK - Para simplificar, vamos salvar todos e o banco lida com duplicados via ID)
-    // Como não podemos gerar IDs antes de inserir pacientes, vamos inserir os pacientes primeiro.
-    
-    // Para evitar N+1, geramos um ID provisório para o paciente se ele não existir
-    const existingPatientId = null; // O ideal seria um bulk upsert, mas vamos usar o fluxo atual simplificado
-
-    // Como o Supabase não permite relacionar IDs gerados aleatoriamente em lote sem upsert complexo,
-    // Vamos manter a criação do paciente individual, mas otimizar o resto.
-    
-    let patientId: string | null = null;
-    if (recurringId) {
-      const { data: existingImport } = await supabaseAdmin
-        .from("google_imported_recurrences")
-        .select("target_id")
-        .eq("user_id", userId)
-        .eq("google_recurring_event_id", recurringId)
-        .maybeSingle();
-      if (existingImport) patientId = existingImport.target_id;
-    }
-
-    if (!patientId) {
-      const { data: existingByName } = await supabaseAdmin
-        .from("patients")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("full_name", rawName)
-        .maybeSingle();
-      if (existingByName) patientId = existingByName.id;
-    }
-
-    if (!patientId) {
-      const { data: patient } = await supabaseAdmin
-        .from("patients")
-        .insert({
-          user_id: userId,
-          full_name: rawName,
-          status: "prospect",
-          google_recurring_event_id: recurringId,
-        })
-        .select("id")
-        .single();
-
-      if (patient) {
-        patientId = patient.id;
-        result.importedPatients++;
-        result.patients.push({ id: patient.id, full_name: rawName });
-      }
-    }
-
-    if (!patientId) continue;
-
-    if (recurringId) {
-      recurrencesToInsert.push({
-        user_id: userId,
-        google_recurring_event_id: recurringId,
-        target_type: "patient",
-        target_id: patientId,
-      });
-    }
-
-    const isRecurring = recurringId !== null && first.recurringEventId !== undefined && !first.originalStartTime;
-
-    if (isRecurring) {
-      schedulesToInsert.push({
-        user_id: userId,
-        patient_id: patientId,
-        weekday: weekday,
-        start_time: startTime,
-        duration_min: durationMin,
-        recurrence_type: "weekly",
-        anchor_date: anchorDate,
-      });
-    } else {
-      appointmentsToInsert.push({
-        user_id: userId,
-        patient_id: patientId,
-        type: "session",
-        weekday: weekday,
-        start_time: startTime,
-        duration_min: durationMin,
-        starts_on: anchorDate,
-        ends_on: anchorDate,
-        is_recurring: false,
-        status: "active",
-        google_event_id: first.id,
-      });
-    }
+    payload.push({
+      recurringId: first.recurringEventId ?? first.id,
+      rawName: first.summary ?? "Sem nome",
+      startTime,
+      weekday,
+      anchorDate,
+      durationMin,
+    });
   }
 
-  // 2. INSERÇÃO EM LOTE (O Segredo da Velocidade)
-  if (recurrencesToInsert.length > 0) {
-    await supabaseAdmin.from("google_imported_recurrences").upsert(recurrencesToInsert, { onConflict: "user_id,google_recurring_event_id" });
-  }
+  // O Segredo: Envia tudo de uma vez para o SQL fazer o trabalho pesado!
+  const { data: count, error } = await supabaseAdmin.rpc("bulk_import_google_calendar", {
+    p_events: payload,
+  });
 
-  if (schedulesToInsert.length > 0) {
-    await supabaseAdmin.from("patient_schedules").insert(schedulesToInsert);
-    result.importedAppointments += schedulesToInsert.length;
-  }
+  if (error) throw new Error("Erro na importação: " + error.message);
 
-  if (appointmentsToInsert.length > 0) {
-    // Ignora duplicados de google_event_id se já existirem
-    await supabaseAdmin.from("appointments").upsert(appointmentsToInsert, { onConflict: "google_event_id" });
-    result.importedAppointments += appointmentsToInsert.length;
-  }
-
-  return result;
+  return {
+    importedEvents: events.length,
+    importedAppointments: (count as number) ?? 0,
+    importedPatients: (count as number) ?? 0,
+    skipped: 0,
+    patients: [],
+  };
 }
