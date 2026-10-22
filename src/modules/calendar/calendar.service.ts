@@ -113,6 +113,8 @@ export async function importCalendarEvents(
 ): Promise<ImportResult> {
   const now = new Date();
   const end = new Date();
+
+  now.setDate(now.getDate() - 60);
   end.setDate(end.getDate() + daysAhead);
 
   const events = await listEvents(userId, now.toISOString(), end.toISOString());
